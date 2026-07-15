@@ -5,24 +5,36 @@ This document explains the core mathematical theories and hardware optimizations
 ## 1. The $O(N^2)$ Problem
 
 Standard Transformers use Scaled Dot-Product Attention:
-$$ \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d}}\right)V $$
+```math
+\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d}}\right)V
+```
 
 For a sequence of length $N$, the $N \times N$ attention matrix $QK^T$ requires $O(N^2)$ memory and compute. When dealing with continuous human speech (often sampled at 16kHz or 44.1kHz), $N$ grows massively. A mere 10 seconds of audio results in hundreds of thousands of tokens. Computing $O(N^2)$ on this scale causes immediate Out-Of-Memory (OOM) errors on any consumer GPU.
 
 ## 2. The Sub-Quadratic $O(N)$ Solution: Causal Associative Scan
 
 To eliminate the $O(N^2)$ bottleneck, we remove the non-linear softmax operation and replace it with a positive feature map. Specifically, we apply:
-$$ \phi(x) = \text{ELU}(x) + 1 $$
+```math
+\phi(x) = \text{ELU}(x) + 1
+```
+
+**Kernel Fusion:** To maximize memory bandwidth, the $\text{ELU}(x) + 1$ activation is mathematically fused directly into the main linear attention CUDA/HIP kernels. The tensors remain in L1 SRAM registers without requiring intermediate VRAM global read/writes, bypassing memory-bound bottlenecks.
 
 By applying $\phi$ independently to $Q$ and $K$, we can leverage the **associative property of matrix multiplication**. Instead of computing $(Q K^T) V$, we compute $Q (K^T V)$.
 
 ### The Recurrent State
 For causal masking (where token $t$ can only attend to tokens $\le t$), we maintain a running accumulation state $S_t$:
-$$ S_t = S_{t-1} + K_t^T V_t $$
-$$ Z_t = Z_{t-1} + K_t^T $$
+```math
+S_t = S_{t-1} + K_t^T V_t
+```
+```math
+Z_t = Z_{t-1} + K_t^T
+```
 
 The output at step $t$ is then simply:
-$$ O_t = \frac{Q_t S_t}{Q_t Z_t} $$
+```math
+O_t = \frac{Q_t S_t}{Q_t Z_t}
+```
 
 This state $S_t$ has a fixed size of $d \times d$ (where $d$ is the model dimension). We process the sequence token-by-token (or block-by-block), resulting in strictly $O(N \cdot d^2)$ complexity. Since $d$ is a constant, the complexity is **linear $O(N)$**.
 
