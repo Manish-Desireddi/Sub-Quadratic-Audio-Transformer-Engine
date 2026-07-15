@@ -1,8 +1,8 @@
 # 
 # Copyright (c) 2026 Manish. All rights reserved.
 # 
-# This work is licensed under the terms of the MIT license.  
-# For a copy, see <https://opensource.org/licenses/MIT>.
+# This work is licensed under the terms of the GNU GPLv3 license.  
+# For a copy, see <https://www.gnu.org/licenses/>.
 # 
 
 import os
@@ -29,6 +29,9 @@ class CMakeBuild(build_ext):
             f"-DPYTHON_EXECUTABLE={sys.executable}",
             "-DCMAKE_BUILD_TYPE=Release"
         ]
+
+        if os.environ.get("USE_ROCM", "0") == "1":
+            cmake_args.append("-DUSE_ROCM=ON")
 
         build_args = ["--config", "Release"]
         

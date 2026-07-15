@@ -23,6 +23,8 @@ public:
 
     uint8_t* allocate(size_t bytes);
     void reset_head();
+    size_t get_offset() const;
+    void set_offset(size_t saved_offset);
     size_t get_used_bytes() const;
     size_t get_total_bytes() const;
 

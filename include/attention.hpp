@@ -15,6 +15,7 @@ struct AttentionContext {
     TensorDescriptor V; // Value
     TensorDescriptor O; // Output
     TensorDescriptor S; // Recurrent State
+    float decay_factor = 0.99f; // Temporal decay for the associative scan
 };
 
 void run_feature_map(TensorDescriptor& tensor);

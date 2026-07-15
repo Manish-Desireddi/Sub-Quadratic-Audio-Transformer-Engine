@@ -1,8 +1,8 @@
 /* 
  * Copyright (c) 2026 Manish. All rights reserved.
  * 
- * This work is licensed under the terms of the MIT license.  
- * For a copy, see <https://opensource.org/licenses/MIT>.
+ * This work is licensed under the terms of the GNU GPLv3 license.  
+ * For a copy, see <https://www.gnu.org/licenses/>.
  */
 
 #include "arena.hpp"
@@ -40,6 +40,18 @@ uint8_t* MemoryArena::allocate(size_t bytes) {
 void MemoryArena::reset_head() {
     offset = 0;
     CHECK_GPU_ERROR(gpuMemset(base_ptr, 0, capacity));
+}
+
+size_t MemoryArena::get_offset() const {
+    return offset;
+}
+
+void MemoryArena::set_offset(size_t saved_offset) {
+    if (saved_offset <= capacity) {
+        offset = saved_offset;
+    } else {
+        throw std::runtime_error("OOM: Invalid offset restoration.");
+    }
 }
 
 size_t MemoryArena::get_used_bytes() const {
