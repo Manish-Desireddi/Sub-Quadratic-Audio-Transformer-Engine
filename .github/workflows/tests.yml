@@ -23,7 +23,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install setuptools pybind11 numpy torch pytest
 
-      - name: Build and Install Package
+      - name: Build and Run C++ Tests
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release
+          cd build && ctest --output-on-failure
+
+      - name: Build and Install Python Package
         run: |
           pip install -e .
 

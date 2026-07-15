@@ -1,8 +1,8 @@
 /* 
  * Copyright (c) 2026 Manish. All rights reserved.
  * 
- * This work is licensed under the terms of the MIT license.  
- * For a copy, see <https://opensource.org/licenses/MIT>.
+ * This work is licensed under the terms of the GNU GPLv3 license.  
+ * For a copy, see <https://www.gnu.org/licenses/>.
  */
 
 #include "sha256.hpp"

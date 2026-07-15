@@ -1,0 +1,51 @@
+# Build Artifacts
+build/
+dist/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Compiled Object files & Binaries
+*.pyd
+*.so
+*.o
+*.obj
+*.exe
+*.lib
+*.dll
+*.pdb
+
+# IDE and Editor configs
+.vscode/
+.idea/
+.vs/
+*.suo
+*.user
+.agents
+rules
+.gitignore
+
+# Model Weights & Vector Indices (Heavy Files)
+*.safetensors
+*.gguf
+*.index
+*.h5
+*.pt
+*.pth
+
+# Audio test files
+*.wav
+*.flac
+*.mp3
+*.ogg
+
+# Demo files:
+demo.mp4
+demo.tape
+Dockerfile
+
+# Environment Tokens
+.env
+.venv
+venv/
+env/
