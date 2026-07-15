@@ -1,8 +1,8 @@
 /* 
  * Copyright (c) 2026 Manish. All rights reserved.
  * 
- * This work is licensed under the terms of the MIT license.  
- * For a copy, see <https://opensource.org/licenses/MIT>.
+ * This work is licensed under the terms of the GNU GPLv3 license.  
+ * For a copy, see <https://www.gnu.org/licenses/>.
  */
 
 #include <pybind11/pybind11.h>
@@ -13,13 +13,19 @@
 #include "attention.hpp"
 #include "gpu_macros.hpp"
 #include "safetensors.hpp"
+#include <xmmintrin.h>
+#include <pmmintrin.h>
 
 namespace py = pybind11;
 
 class SubQEngineWrapper {
 public:
     SubQEngineWrapper(size_t vram_capacity) 
-        : arena_(vram_capacity), engine_(arena_) {}
+        : arena_(vram_capacity), engine_(arena_) {
+        // Prevent subnormal floats from stalling the ALU
+        _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+        _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+    }
 
     void load(const std::string& filepath) {
         try {
@@ -36,7 +42,8 @@ public:
 
     py::array_t<float> forward(py::array_t<float, py::array::c_style | py::array::forcecast> Q, 
                                py::array_t<float, py::array::c_style | py::array::forcecast> K, 
-                               py::array_t<float, py::array::c_style | py::array::forcecast> V) {
+                               py::array_t<float, py::array::c_style | py::array::forcecast> V,
+                               float decay_factor = 0.99f) {
         try {
             py::buffer_info buf_Q = Q.request();
             py::buffer_info buf_K = K.request();
@@ -50,51 +57,92 @@ public:
             size_t seq_len = buf_Q.shape[1];
             size_t d_model = buf_Q.shape[2];
 
-            // Allocate output array on host
-            auto result = py::array_t<float>({batch, seq_len, d_model});
-            py::buffer_info buf_out = result.request();
+            // 1. Zero-Copy Handoff allocation
+            size_t total_elements = batch * seq_len * d_model;
+            float* host_out_data = new float[total_elements];
+            py::capsule free_when_done(host_out_data, [](void *f) {
+                float *foo = reinterpret_cast<float *>(f);
+                delete[] foo;
+            });
 
-            // Reset arena for this forward pass
+            auto result = py::array_t<float>(
+                {batch, seq_len, d_model}, 
+                {seq_len * d_model * sizeof(float), d_model * sizeof(float), sizeof(float)}, 
+                host_out_data, 
+                free_when_done
+            );
+
+            // 2. Chunking logic for O(1) VRAM footprint
             arena_.reset_head();
-
-            size_t bytes = batch * seq_len * d_model * sizeof(float);
             size_t state_bytes = batch * d_model * d_model * sizeof(float);
-            
-            // Allocate MemoryArena device pointers
-            float* d_Q = reinterpret_cast<float*>(arena_.allocate(bytes));
-            float* d_K = reinterpret_cast<float*>(arena_.allocate(bytes));
-            float* d_V = reinterpret_cast<float*>(arena_.allocate(bytes));
-            float* d_O = reinterpret_cast<float*>(arena_.allocate(bytes));
             float* d_S = reinterpret_cast<float*>(arena_.allocate(state_bytes));
 
-            // Copy host numpy arrays to device arena
 #if defined(USE_CUDA) || defined(USE_HIP)
-            CHECK_GPU_ERROR(gpuMemcpy(d_Q, buf_Q.ptr, bytes, gpuMemcpyHostToDevice));
-            CHECK_GPU_ERROR(gpuMemcpy(d_K, buf_K.ptr, bytes, gpuMemcpyHostToDevice));
-            CHECK_GPU_ERROR(gpuMemcpy(d_V, buf_V.ptr, bytes, gpuMemcpyHostToDevice));
             CHECK_GPU_ERROR(gpuMemset(d_S, 0, state_bytes));
 #else
-            std::memcpy(d_Q, buf_Q.ptr, bytes);
-            std::memcpy(d_K, buf_K.ptr, bytes);
-            std::memcpy(d_V, buf_V.ptr, bytes);
             std::memset(d_S, 0, state_bytes);
 #endif
 
-            AttentionContext ctx;
-            ctx.Q = { {batch, seq_len, d_model}, {}, PrecisionMode::FP32, d_Q, true };
-            ctx.K = { {batch, seq_len, d_model}, {}, PrecisionMode::FP32, d_K, true };
-            ctx.V = { {batch, seq_len, d_model}, {}, PrecisionMode::FP32, d_V, true };
-            ctx.S = { {batch, d_model, d_model}, {}, PrecisionMode::FP32, d_S, true }; 
-            ctx.O = { {batch, seq_len, d_model}, {}, PrecisionMode::FP32, d_O, true };
+            // Save the offset so we can rewind back here for every chunk
+            size_t saved_offset = arena_.get_offset();
 
-            engine_.forward(ctx);
+            // Define a chunk size based on remaining arena capacity
+            size_t available_bytes = arena_.get_total_bytes() - saved_offset;
+            size_t max_chunk_size = available_bytes / (4 * batch * d_model * sizeof(float));
+            size_t chunk_size = std::min(max_chunk_size, static_cast<size_t>(16384)); // Safe ceiling
 
-            // Copy device results back to host numpy array
+            float* host_Q = static_cast<float*>(buf_Q.ptr);
+            float* host_K = static_cast<float*>(buf_K.ptr);
+            float* host_V = static_cast<float*>(buf_V.ptr);
+
+            for (size_t t = 0; t < seq_len; t += chunk_size) {
+                size_t current_chunk = std::min(chunk_size, seq_len - t);
+                size_t chunk_bytes = batch * current_chunk * d_model * sizeof(float);
+
+                arena_.set_offset(saved_offset); // Rewind pointer
+                float* d_Q = reinterpret_cast<float*>(arena_.allocate(chunk_bytes));
+                float* d_K = reinterpret_cast<float*>(arena_.allocate(chunk_bytes));
+                float* d_V = reinterpret_cast<float*>(arena_.allocate(chunk_bytes));
+                float* d_O = reinterpret_cast<float*>(arena_.allocate(chunk_bytes));
+
+                for (size_t b = 0; b < batch; ++b) {
+                    size_t src_offset = b * (seq_len * d_model) + t * d_model;
+                    size_t dst_offset = b * (current_chunk * d_model);
+                    size_t batch_chunk_bytes = current_chunk * d_model * sizeof(float);
+
 #if defined(USE_CUDA) || defined(USE_HIP)
-            CHECK_GPU_ERROR(gpuMemcpy(buf_out.ptr, d_O, bytes, gpuMemcpyDeviceToHost));
+                    CHECK_GPU_ERROR(gpuMemcpy(d_Q + dst_offset, host_Q + src_offset, batch_chunk_bytes, gpuMemcpyHostToDevice));
+                    CHECK_GPU_ERROR(gpuMemcpy(d_K + dst_offset, host_K + src_offset, batch_chunk_bytes, gpuMemcpyHostToDevice));
+                    CHECK_GPU_ERROR(gpuMemcpy(d_V + dst_offset, host_V + src_offset, batch_chunk_bytes, gpuMemcpyHostToDevice));
 #else
-            std::memcpy(buf_out.ptr, d_O, bytes);
+                    std::memcpy(d_Q + dst_offset, host_Q + src_offset, batch_chunk_bytes);
+                    std::memcpy(d_K + dst_offset, host_K + src_offset, batch_chunk_bytes);
+                    std::memcpy(d_V + dst_offset, host_V + src_offset, batch_chunk_bytes);
 #endif
+                }
+
+                AttentionContext ctx;
+                ctx.Q = { {batch, current_chunk, d_model}, {}, PrecisionMode::FP32, d_Q, true };
+                ctx.K = { {batch, current_chunk, d_model}, {}, PrecisionMode::FP32, d_K, true };
+                ctx.V = { {batch, current_chunk, d_model}, {}, PrecisionMode::FP32, d_V, true };
+                ctx.S = { {batch, d_model, d_model}, {}, PrecisionMode::FP32, d_S, true }; 
+                ctx.O = { {batch, current_chunk, d_model}, {}, PrecisionMode::FP32, d_O, true };
+                ctx.decay_factor = decay_factor;
+
+                engine_.forward(ctx);
+
+                for (size_t b = 0; b < batch; ++b) {
+                    size_t dst_offset = b * (seq_len * d_model) + t * d_model;
+                    size_t src_offset = b * (current_chunk * d_model);
+                    size_t batch_chunk_bytes = current_chunk * d_model * sizeof(float);
+
+#if defined(USE_CUDA) || defined(USE_HIP)
+                    CHECK_GPU_ERROR(gpuMemcpy(host_out_data + dst_offset, d_O + src_offset, batch_chunk_bytes, gpuMemcpyDeviceToHost));
+#else
+                    std::memcpy(host_out_data + dst_offset, d_O + src_offset, batch_chunk_bytes);
+#endif
+                }
+            }
 
             return result;
         } catch (const std::exception& e) {
@@ -115,5 +163,5 @@ PYBIND11_MODULE(subq_engine, m) {
     py::class_<SubQEngineWrapper>(m, "SubQEngine")
         .def(py::init<size_t>(), py::arg("vram_capacity") = 1024 * 1024 * 256)
         .def("load", &SubQEngineWrapper::load, py::arg("filepath"))
-        .def("forward", &SubQEngineWrapper::forward, py::arg("Q"), py::arg("K"), py::arg("V"));
+        .def("forward", &SubQEngineWrapper::forward, py::arg("Q"), py::arg("K"), py::arg("V"), py::arg("decay_factor") = 0.99f);
 }

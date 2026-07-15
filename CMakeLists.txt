@@ -1,10 +1,23 @@
 cmake_minimum_required(VERSION 3.24)
 project(SubQuadraticAudioTransformer LANGUAGES CXX)
 
+if(POLICY CMP0148)
+  cmake_policy(SET CMP0148 NEW)
+endif()
+if(POLICY CMP0091)
+  cmake_policy(SET CMP0091 NEW)
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_POLICY_VERSION_MINIMUM "3.5")
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+if(MSVC)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /fp:fast")
+else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffast-math") # Prevents subnormal CPU stalls
+endif()
+
 
 option(USE_ROCM "Use AMD ROCm/HIP instead of NVIDIA CUDA" OFF)
 option(FORCE_CPU "Force CPU fallback, disabling GPU support" OFF)
@@ -20,6 +33,9 @@ elseif(USE_ROCM)
         enable_language(HIP)
         add_compile_definitions(USE_HIP)
         set(GPU_BACKEND "HIP")
+        set(CMAKE_HIP_STANDARD 20)
+        set(CMAKE_HIP_STANDARD_REQUIRED ON)
+        set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3 -mllvm -amdgpu-early-inline-all=true")
     else()
         message(WARNING "HIP compiler not found. Falling back to CPU.")
         set(GPU_BACKEND "CPU")
@@ -31,6 +47,7 @@ else()
         set(CMAKE_CUDA_STANDARD 20)
         set(CMAKE_CUDA_STANDARD_REQUIRED ON)
         set(CMAKE_CUDA_ARCHITECTURES "native")
+        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -ftz=true") # Flush-to-zero to prevent Tensor Core underflow stalls
         add_compile_definitions(USE_CUDA)
         set(GPU_BACKEND "CUDA")
     else()
@@ -42,6 +59,7 @@ endif()
 include(FetchContent)
 
 # Fetch pybind11
+set(PYBIND11_FINDPYTHON ON CACHE BOOL "Use modern FindPython instead of legacy" FORCE)
 FetchContent_Declare(
   pybind11
   GIT_REPOSITORY https://github.com/pybind/pybind11.git
@@ -112,6 +130,9 @@ target_link_libraries(test_attention PRIVATE subq_core Catch2::Catch2WithMain)
 
 add_executable(test_safetensors tests/test_safetensors.cpp)
 target_link_libraries(test_safetensors PRIVATE subq_core Catch2::Catch2WithMain)
+
+add_executable(test_benchmark_audio tests/benchmark_audio.cpp)
+target_link_libraries(test_benchmark_audio PRIVATE subq_core Catch2::Catch2WithMain)
 
 # Add Native C++ CLI
 add_executable(subq_cli src/main.cpp)
