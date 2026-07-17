@@ -14,15 +14,13 @@ except ImportError:
 def engine():
     return subq_engine.SubQEngine(256 * 1024 * 1024)
 
-def test_computational_scaling(engine):
+def test_computational_scaling(engine, real_audio):
     batch = 1
     d_model = 256
     seq_lengths = [1024, 4096] # Test practical small sequences
     
     for seq_len in seq_lengths:
-        Q = np.random.randn(batch, seq_len, d_model).astype(np.float32)
-        K = np.random.randn(batch, seq_len, d_model).astype(np.float32)
-        V = np.random.randn(batch, seq_len, d_model).astype(np.float32)
+        Q, K, V = real_audio(batch, seq_len, d_model)
         
         # Warmup
         _ = engine.forward(Q, K, V)
@@ -37,14 +35,14 @@ def test_computational_scaling(engine):
         if info['backend'] != "CPU":
             assert latency < 1000.0, f"Latency {latency:.2f} ms exceeds 1000ms threshold for O(1) engine on GPU"
 
-def test_mathematical_stability(engine):
+def test_mathematical_stability(engine, real_audio):
     batch = 1
     d_model = 256
     massive_seq = 100000
     
-    Q = np.random.randn(batch, massive_seq, d_model).astype(np.float32) / np.sqrt(d_model)
-    K = np.random.randn(batch, massive_seq, d_model).astype(np.float32) / np.sqrt(d_model)
-    V = np.random.randn(batch, massive_seq, d_model).astype(np.float32) / np.sqrt(d_model)
+    Q, K, V = real_audio(batch, massive_seq, d_model)
+    # Scale down slightly to prevent immediate blowup on massive real audio
+    Q, K, V = Q / np.sqrt(d_model), K / np.sqrt(d_model), V / np.sqrt(d_model)
     
     out = engine.forward(Q, K, V)
     
