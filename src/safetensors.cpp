@@ -118,10 +118,12 @@ bool SafetensorLoader::load(const std::string &filepath) {
           tensor["data_offsets"].get<std::vector<size_t>>();
 
       // Security : Prevent Integer Underflow/Overflow on offsets (CWE-191)
-      if (offsets.size() != 2 || offsets[0] > offsets[1] ||
-          data_start_offset_ + offsets[1] > file_size) {
+      if (offsets.size() != 2 || offsets[0] > offsets[1]) {
+        throw std::runtime_error("Invalid data offsets in header.");
+      }
+      if (offsets[1] > file_size || data_start_offset_ > file_size - offsets[1]) {
         throw std::runtime_error(
-            "Data offsets exceed file size boundaries or underflowed.");
+            "Data offsets exceed file size boundaries or overflowed.");
       }
 
       // Zero-Copy Mapped loading to Arena

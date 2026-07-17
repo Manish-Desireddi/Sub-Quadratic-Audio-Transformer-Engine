@@ -15,8 +15,39 @@
 #include "safetensors.hpp"
 #include <xmmintrin.h>
 #include <pmmintrin.h>
+#include <mutex>
 
 namespace py = pybind11;
+
+py::dict get_device_info() {
+    py::dict info;
+#if defined(USE_CUDA)
+    int device;
+    cudaGetDevice(&device);
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, device);
+    info["backend"] = "CUDA";
+    info["architecture"] = std::string("SM ") + std::to_string(prop.major) + "." + std::to_string(prop.minor);
+    info["memory_size"] = prop.totalGlobalMem;
+    info["bfloat16_supported"] = (prop.major >= 8);
+#elif defined(USE_HIP)
+    int device;
+    hipGetDevice(&device);
+    hipDeviceProp_t prop;
+    hipGetDeviceProperties(&prop, device);
+    info["backend"] = "HIP";
+    info["architecture"] = std::string(prop.gcnArchName);
+    info["memory_size"] = prop.totalGlobalMem;
+    std::string arch(prop.gcnArchName);
+    info["bfloat16_supported"] = (arch.find("gfx11") != std::string::npos || arch.find("gfx90a") != std::string::npos);
+#else
+    info["backend"] = "CPU";
+    info["architecture"] = "Host";
+    info["memory_size"] = 0;
+    info["bfloat16_supported"] = false;
+#endif
+    return info;
+}
 
 class SubQEngineWrapper {
 public:
@@ -28,6 +59,7 @@ public:
     }
 
     void load(const std::string& filepath) {
+        std::lock_guard<std::mutex> lock(arena_mutex_);
         try {
             SafetensorLoader loader(arena_);
             if (!loader.load(filepath)) {
@@ -44,6 +76,7 @@ public:
                                py::array_t<float, py::array::c_style | py::array::forcecast> K, 
                                py::array_t<float, py::array::c_style | py::array::forcecast> V,
                                float decay_factor = 0.99f) {
+        std::lock_guard<std::mutex> lock(arena_mutex_);
         try {
             py::buffer_info buf_Q = Q.request();
             py::buffer_info buf_K = K.request();
@@ -121,11 +154,15 @@ public:
 #endif
                 }
 
+                py::dict info = get_device_info();
+                bool bf16_supported = info["bfloat16_supported"].cast<bool>();
+                PrecisionMode precision = bf16_supported ? PrecisionMode::BF16 : PrecisionMode::FP32;
+
                 AttentionContext ctx;
                 ctx.Q = { {batch, current_chunk, d_model}, {}, PrecisionMode::FP32, d_Q, true };
                 ctx.K = { {batch, current_chunk, d_model}, {}, PrecisionMode::FP32, d_K, true };
                 ctx.V = { {batch, current_chunk, d_model}, {}, PrecisionMode::FP32, d_V, true };
-                ctx.S = { {batch, d_model, d_model}, {}, PrecisionMode::FP32, d_S, true }; 
+                ctx.S = { {batch, d_model, d_model}, {}, precision, d_S, true }; 
                 ctx.O = { {batch, current_chunk, d_model}, {}, PrecisionMode::FP32, d_O, true };
                 ctx.decay_factor = decay_factor;
 
@@ -153,12 +190,15 @@ public:
     }
 
 private:
+    std::mutex arena_mutex_;
     MemoryArena arena_;
     Engine engine_;
 };
 
 PYBIND11_MODULE(subq_engine, m) {
     m.doc() = "Sub-Quadratic Audio Transformer Engine C++ backend";
+
+    m.def("get_device_info", &get_device_info, "Get hardware telemetry info");
 
     py::class_<SubQEngineWrapper>(m, "SubQEngine")
         .def(py::init<size_t>(), py::arg("vram_capacity") = 1024 * 1024 * 256)
