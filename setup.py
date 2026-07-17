@@ -30,9 +30,6 @@ class CMakeBuild(build_ext):
             "-DCMAKE_BUILD_TYPE=Release"
         ]
 
-        if os.environ.get("USE_ROCM", "0") == "1":
-            cmake_args.append("-DUSE_ROCM=ON")
-
         build_args = ["--config", "Release"]
         
         if not os.path.exists(self.build_temp):

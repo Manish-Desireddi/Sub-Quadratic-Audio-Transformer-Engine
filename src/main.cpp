@@ -78,34 +78,34 @@ void consumer_thread(AudioStreamBuffer& buffer) {
     size_t seq_len = 1024;
     size_t d_model = 256;
     
-    // In FP16 mode, each element is 2 bytes (gpuHalf)
+    // In FP16 mode, each element is 2 bytes (uint16_t)
     size_t tensor_elements = batch * seq_len * d_model;
-    size_t tensor_bytes = tensor_elements * sizeof(gpuHalf);
+    size_t tensor_bytes = tensor_elements * sizeof(uint16_t);
     size_t state_bytes = batch * d_model * d_model * sizeof(float);
     
     // Pre-allocate persistent device memory
-    gpuHalf* d_Q = reinterpret_cast<gpuHalf*>(arena.allocate(tensor_bytes));
-    gpuHalf* d_K = reinterpret_cast<gpuHalf*>(arena.allocate(tensor_bytes));
-    gpuHalf* d_V = reinterpret_cast<gpuHalf*>(arena.allocate(tensor_bytes));
-    gpuHalf* d_O = reinterpret_cast<gpuHalf*>(arena.allocate(tensor_bytes));
+    uint16_t* d_Q = reinterpret_cast<uint16_t*>(arena.allocate(tensor_bytes));
+    uint16_t* d_K = reinterpret_cast<uint16_t*>(arena.allocate(tensor_bytes));
+    uint16_t* d_V = reinterpret_cast<uint16_t*>(arena.allocate(tensor_bytes));
+    uint16_t* d_O = reinterpret_cast<uint16_t*>(arena.allocate(tensor_bytes));
     float* d_S = reinterpret_cast<float*>(arena.allocate(state_bytes));
-    
+
     AttentionContext ctx;
-    ctx.Q = { {batch, seq_len, d_model}, {}, PrecisionMode::FP16, d_Q, true };
-    ctx.K = { {batch, seq_len, d_model}, {}, PrecisionMode::FP16, d_K, true };
-    ctx.V = { {batch, seq_len, d_model}, {}, PrecisionMode::FP16, d_V, true };
-    ctx.S = { {batch, d_model, d_model}, {}, PrecisionMode::FP32, d_S, true }; 
-    ctx.O = { {batch, seq_len, d_model}, {}, PrecisionMode::FP16, d_O, true };
+    ctx.Q.dimensions = {batch, seq_len, d_model}; ctx.Q.precision = PrecisionMode::FP16; ctx.Q.data = d_Q; ctx.Q.is_on_host = true;
+    ctx.K.dimensions = {batch, seq_len, d_model}; ctx.K.precision = PrecisionMode::FP16; ctx.K.data = d_K; ctx.K.is_on_host = true;
+    ctx.V.dimensions = {batch, seq_len, d_model}; ctx.V.precision = PrecisionMode::FP16; ctx.V.data = d_V; ctx.V.is_on_host = true;
+    ctx.S.dimensions = {batch, d_model, d_model}; ctx.S.precision = PrecisionMode::FP32; ctx.S.data = d_S; ctx.S.is_on_host = true; 
+    ctx.O.dimensions = {batch, seq_len, d_model}; ctx.O.precision = PrecisionMode::FP16; ctx.O.data = d_O; ctx.O.is_on_host = true;
 
     AudioChunk chunk;
     int frames_processed = 0;
     
     // Allocate Pinned Host Memory for fast H2D transfers and FP16 conversion
-    gpuHalf* h_pinned_data = nullptr;
+    uint16_t* h_pinned_data = nullptr;
 #if defined(USE_CUDA) || defined(USE_HIP)
     gpuHostAlloc((void**)&h_pinned_data, tensor_bytes, gpuHostAllocDefault);
 #else
-    h_pinned_data = new gpuHalf[tensor_elements];
+    h_pinned_data = new uint16_t[tensor_elements];
 #endif
     
     auto process_start = std::chrono::high_resolution_clock::now();

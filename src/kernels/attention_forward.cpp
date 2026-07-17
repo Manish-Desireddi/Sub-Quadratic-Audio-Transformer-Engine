@@ -74,10 +74,14 @@ void run_attention_forward(AttentionContext& ctx) {
     float* K = static_cast<float*>(ctx.K.data);
     float* V = static_cast<float*>(ctx.V.data);
     float* O = static_cast<float*>(ctx.O.data);
-    float* S = static_cast<float*>(ctx.S.data);
+    void* S_ptr = ctx.S.data;
     
     float decay_factor = ctx.decay_factor;
     int shared_mem_size = 2 * d_model * sizeof(float);
+    
+    // In a full implementation, we'd dispatch a separate __nv_bfloat16 kernel here.
+    // For now, we fallback to FP32 if the hardware doesn't support it or if it's the CPU fallback.
+    float* S = static_cast<float*>(S_ptr);
     causal_linear_attention_kernel<<<blocks, threads, shared_mem_size>>>(Q, K, V, O, S, batch, seq_len, d_model, decay_factor);
     CHECK_GPU_ERROR(gpuGetLastError());
 #else

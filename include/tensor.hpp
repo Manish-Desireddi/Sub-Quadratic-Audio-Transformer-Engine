@@ -9,6 +9,7 @@
 
 #include <vector>
 #include <cstdint>
+#include <cstddef>
 
 enum class PrecisionMode {
     FP32,

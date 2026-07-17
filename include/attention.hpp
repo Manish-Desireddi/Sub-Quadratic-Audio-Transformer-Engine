@@ -6,7 +6,9 @@
  */
 
 #pragma once
+
 #include "tensor.hpp"
+#include <cmath>
 #include "gpu_macros.hpp"
 
 struct AttentionContext {
