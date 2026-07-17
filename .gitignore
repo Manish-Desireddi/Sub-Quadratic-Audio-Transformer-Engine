@@ -1,9 +1,11 @@
 # Build Artifacts
 build/
+build_linux/
 dist/
 __pycache__/
 *.egg-info/
 .pytest_cache/
+.ruff_cache/
 
 # Compiled Object files & Binaries
 *.pyd
@@ -42,7 +44,8 @@ rules
 # Demo files:
 demo.mp4
 demo.tape
-Dockerfile
+Dockerfile.vhs
+run_demo.sh
 
 # Environment Tokens
 .env
