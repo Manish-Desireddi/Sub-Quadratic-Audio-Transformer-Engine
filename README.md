@@ -64,7 +64,10 @@ git clone https://github.com/Manish-Desireddi/Sub-Quadratic-Audio-Transformer-En
 cd Sub-Quadratic-Audio-Transformer-Engine
 python -m venv venv
 venv\Scripts\activate # Windows
+# For NVIDIA CUDA (Default)
 pip install -e .
+# For AMD ROCm/HIP parity
+USE_ROCM=1 pip install -e .
 ```
 
 ```python
@@ -82,15 +85,16 @@ output = engine.forward(Q, K, V)
 
 ## Features
 
-- **$O(1)$ Memory Footprint**: Strictly constant VRAM allocation ($256 \text{ MB}$) regardless of context horizon up to 131,000+ tokens.
+- **$O(1)$ Memory Footprint**: Strictly constant VRAM allocation ($256 \text{ MB}$) regardless of context horizon up to 131,072+ tokens.
 - **$O(N)$ Computational Scaling**: Sub-quadratic execution natively through optimized Associative Scans.
 - **Kernel Fusion Architecture**: The positive feature map $\phi(x) = \text{ELU}(x) + 1$ is fused directly into the core causal attention sequence, eliminating intermediate VRAM accesses and reclaiming bandwidth.
 - **Cross-Platform Native Parity**: Unified hybrid dispatcher compiles zero-regression instruction sets for both NVIDIA CUDA and AMD ROCm/HIP natively.
 - **Clean Build Policies**: Fully conforms to modern CMake bounds (`CMP0148`, `CMP0091`) ensuring silent, warning-free PyBind compilation.
 - **Temporal Decay Mathematical Stability**: Implements bounds mathematically to prevent gradient explosion over infinity.
 - **Precision Safe**: Flush-To-Zero (FTZ) & Denormals-Are-Zero (DAZ) enforced at compiler & software levels to bypass hardware subnormal stalls.
-- **Thread-Safe GIL Synchronization**: Naturally handles concurrent asynchronous Python threads routing to C++.
+- **Thread-Safe GIL Synchronization**: `std::mutex` serialized orchestration naturally handles concurrent asynchronous Python threads routing to C++ for hot-swaps.
 - **Zero-Copy Memory Model**: `py::capsule` garbage-collected ownership yielding across the Python C++ FFI.
+- **Hardened C++ Security bounds**: Patched `SIZE_MAX` integer overflows (CWE-190) in the safetensors JSON offset bounds check.
 
 ## Configuration
 

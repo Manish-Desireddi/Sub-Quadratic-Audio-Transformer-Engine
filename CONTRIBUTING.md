@@ -33,9 +33,9 @@ pip install -e .
 ```
 
 ### 4. Run Tests
-Before submitting a PR, ensure all tests pass:
+Before submitting a PR, ensure all tests pass. You must run the standard validation suite, including the fuzzing payload validations and continuous endurance streams:
 ```bash
-python tests/benchmark_audio.py
+python -m pytest tests/test_fuzz.py tests/test_endurance.py tests/test_benchmarks.py -v
 ```
 
 ## Formatting Rules
