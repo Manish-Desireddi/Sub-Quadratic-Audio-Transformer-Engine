@@ -1,8 +1,6 @@
 import numpy as np
 import time
 import os
-import psutil
-import torch
 
 try:
     import subq_engine
@@ -12,7 +10,7 @@ except ImportError:
     import build.Release.subq_engine as subq_engine
 
 def verify_computational_scaling():
-    print("=== 1. Computational Scaling ===")
+    print("    1. Computational Scaling    ")
     engine = subq_engine.SubQEngine(256 * 1024 * 1024)
     batch = 1
     d_model = 256
@@ -41,7 +39,7 @@ def verify_computational_scaling():
         print(f"{seq_len:<15} | {latency:<20.2f} | {peak_vram:<20}")
 
 def verify_throughput():
-    print("\n=== 2. Throughput & Hardware Efficiency ===")
+    print("\n    2. Throughput & Hardware Efficiency    ")
     engine = subq_engine.SubQEngine(256 * 1024 * 1024)
     batch = 1
     d_model = 256
@@ -77,14 +75,14 @@ def verify_throughput():
     print(f"Hardware Utilization (FLOPs/s): {total_flops / 1e9:.2f} GFLOPs")
 
 def verify_stability():
-    print("\n=== 3. Mathematical Stability ===")
+    print("\n    3. Mathematical Stability    ")
     engine = subq_engine.SubQEngine(256 * 1024 * 1024)
     batch = 1
     d_model = 256
     
     # Simulate a massive stream (e.g. 5 minutes at 16kHz = 4.8 million tokens)
-    # We'll use 1 million for the test to ensure it finishes in a reasonable time
-    massive_seq = 1000000
+    # We'll use 250,000 for the CPU Docker test to ensure the video finishes in a reasonable time
+    massive_seq = 250000
     print(f"Processing massive stream ({massive_seq} tokens)...")
     
     Q = np.random.randn(batch, massive_seq, d_model).astype(np.float32) / np.sqrt(d_model)

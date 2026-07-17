@@ -34,7 +34,7 @@ def test_forward_equivalence():
     # C++ execution
     engine = subq_engine.SubQEngine(128 * 1024 * 1024)
     # Clone to numpy so C++ can modify in place without breaking our original tensors
-    O_cpp = engine.forward(Q.clone().numpy(), K.clone().numpy(), V.clone().numpy())
+    O_cpp = engine.forward(Q.clone().numpy(), K.clone().numpy(), V.clone().numpy(), decay_factor=1.0)
     O_cpp_tensor = torch.from_numpy(O_cpp)
 
     # Validate equivalence

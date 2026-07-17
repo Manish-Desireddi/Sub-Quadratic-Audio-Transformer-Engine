@@ -39,3 +39,18 @@ TEST_CASE("MemoryArena out-of-bounds allocation throws error", "[MemoryArena]") 
     // Should throw runtime_error
     REQUIRE_THROWS_AS(arena.allocate(512), std::runtime_error);
 }
+
+TEST_CASE("MemoryArena absolute boundary integrity", "[MemoryArena]") {
+    size_t cap = 256 * 1024 * 1024; // 256MB boundary
+    MemoryArena arena(cap);
+    
+    uint8_t* p1 = arena.allocate(cap - 100);
+    REQUIRE(p1 != nullptr);
+    
+    // Attempting to exceed O(1) bound
+    REQUIRE_THROWS_AS(arena.allocate(200), std::runtime_error);
+    
+    // Verify pointers fall strictly within allocated buffer
+    uint8_t* base = arena.allocate(0); // Should point to current offset
+    REQUIRE(reinterpret_cast<uintptr_t>(base) <= reinterpret_cast<uintptr_t>(p1) + cap);
+}
