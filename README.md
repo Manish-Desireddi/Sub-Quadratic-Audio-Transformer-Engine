@@ -61,7 +61,7 @@ graph TD
 ## Quickstart & Python Frictionless API
 We provide a polished, single-line Python API for researchers and developers to instantly tap into the bare-metal C++ engine.
 
-`ash
+```Bash
 git clone https://github.com/Manish-Desireddi/Sub-Quadratic-Audio-Transformer-Engine.git
 cd Sub-Quadratic-Audio-Transformer-Engine
 python -m venv venv
@@ -70,9 +70,9 @@ venv\Scripts\activate # Windows
 pip install -e .
 # For AMD ROCm/HIP parity
 USE_ROCM=1 pip install -e .
-`
+```
 
-`python
+```python
 import numpy as np
 import subq_audio
 
@@ -83,7 +83,7 @@ Q = np.random.rand(1, 1024, 256).astype(np.float32)
 K = np.random.rand(1, 1024, 256).astype(np.float32)
 V = np.random.rand(1, 1024, 256).astype(np.float32)
 output = engine.forward(Q, K, V)
-`
+```
 
 ## Features
 
