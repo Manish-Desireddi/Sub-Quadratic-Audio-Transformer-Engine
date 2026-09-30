@@ -2,7 +2,7 @@
 
 # Sub-Quadratic Audio Transformer Engine
 
-A Bare-Metal, Lock-Free $O(N) Attention Engine for Infinite Continuous Audio Streaming.
+A Bare-Metal, Lock-Free $O(N)$ Attention Engine for Infinite Continuous Audio Streaming.
 
 [![C++20](https://img.shields.io/badge/C++-20-blue.svg)](https://isocpp.org/)
 [![CUDA](https://img.shields.io/badge/CUDA-12.0+-green.svg)](https://developer.nvidia.com/cuda-zone)
