@@ -53,8 +53,22 @@ Model weights (via `.safetensors`) and audio streams bypass standard CPU-to-GPU 
 - A single DMA (Direct Memory Access) transfer streams the weights into the GPU Memory Arena.
 - Audio chunks from `libsndfile` are deposited into a Single-Producer Single-Consumer (SPSC) lock-free ring buffer, where the GPU natively pulls the frames without stalling the Python GIL or audio thread.
 - **Python FFI Handoff:** Tensors are explicitly yielded across the Python C++ boundary via `py::capsule` garbage-collected ownership wrappers, ensuring zero memory leaks and complete $O(1)$ memory invariance (256MB) without Python-side reallocation overhead.
+- Thread-Safe GIL Synchronization: The FFI layer utilizes std::mutex locking to safely serialize orchestration, preventing GIL-bypassing race conditions during concurrent asynchronous Python thread hot-swaps.
 
-## 5. Hardware Hybrid Dispatcher
+## 5. Hardware Dispatcher Strategy
 
-The C++ core is abstracted using custom macros that compile identically for both NVIDIA (`nvcc` / CUDA) and AMD (`hipcc` / ROCm), natively achieving true cross-platform hardware parity without performance regressions.
-- `__shared__` memory tiling is heavily utilized in the custom kernels to ensure $Q$, $K$, and $V$ vectors remain in ultra-fast L1 SRAM during the matrix-vector accumulations.
+The engine employs a unified C++ abstraction layer that compiles identically for NVIDIA (`nvcc` / CUDA) and AMD (`hipcc` / ROCm). This strategy ensures true cross-platform hardware parity without performance regressions.
+
+- **`__shared__` Memory Tiling**: Heavy utilization of `__shared__` memory in the custom kernels ensures $Q$, $K$, and $V$ vectors remain resident in ultra-fast L1 SRAM during matrix-vector accumulations.
+- **Zero-Copy Data Path**: Data is streamed directly from host-allocated pinned memory into the GPU's Memory Arena via DMA, bypassing the PCIe bus and eliminating traditional PCIe-bound latency penalties.
+- **Backend Compilation**:
+The engine supports two primary hardware backends:
+    1. **CUDA (NVIDIA)**: Compiled using `nvcc` with NVIDIA-specific optimizations.
+    2. **ROCm/HIP (AMD)**: Compiled using `hipcc` with AMD-specific instruction scheduling to mitigate control-flow divergence inherent in scan operations.
+- **Cross-Platform Compatibility**: A custom hardware abstraction layer (`Hardware.h`) provides architecture-specific macros (`CUDA_ARCH`, `ROCm_ARCH`) that enable identical C++ code to compile natively across both NVIDIA and AMD architectures, ensuring true cross-platform parity without performance regressions.
+- **Hardware-Aware Optimization**:
+    - **NVIDIA**: `__shared__` memory tiling and vectorization saturate memory bandwidth for peak throughput.
+    - **AMD**: Hardware-specific instruction scheduling mitigates control-flow divergence and optimizes instruction-level parallelism for AMD's wavefront execution model.
+- **Processor Abstraction Layer (PAL)**:
+A processor abstraction layer enables seamless hardware dispatch, ensuring identical C++ code compiles natively across both NVIDIA (`nvcc`) and AMD (`hipcc`) architectures while maintaining true cross-platform parity without performance regressions.
+- **BFloat16 Kernel Abstraction**: Natively integrates BFloat16 precision support alongside FP32, maximizing memory bandwidth and computational throughput on compatible accelerator architectures.

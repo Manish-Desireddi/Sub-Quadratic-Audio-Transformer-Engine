@@ -59,23 +59,31 @@ public:
     // Pop the oldest audio chunk from the buffer (Consumer)
     bool pop(AudioChunk& chunk, bool block = true) {
         while (true) {
-            size_t current_head = head_.load(std::memory_order_relaxed);
-            
+            size_t current_head = head_.load(std::memory_order_acquire);
+
             if (current_head == tail_.load(std::memory_order_acquire)) {
                 // Buffer empty
-                if (stopped_.load(std::memory_order_relaxed) && !block) return false;
-                if (!block) return false;
-                
-                if (stopped_.load(std::memory_order_relaxed)) return false;
+                if (!block || stopped_.load(std::memory_order_relaxed)) return false;
                 std::this_thread::yield();
                 continue;
             }
-            
-            chunk = buffer_[current_head];
-            head_.store((current_head + 1) & mask_, std::memory_order_release);
-            return true;
+
+            AudioChunk staged = buffer_[current_head];
+            size_t next_head = (current_head + 1) & mask_;
+
+            // CAS prevents ABA: if producer advanced head_ (frame drop) between our load and
+            // this store, the CAS fails and we retry from the updated position.
+            if (head_.compare_exchange_weak(
+                    current_head, next_head,
+                    std::memory_order_release,
+                    std::memory_order_acquire)) {
+                chunk = std::move(staged);
+                return true;
+            }
+            // CAS failed — producer advanced head_; retry with new head value
         }
     }
+
 
     void stop() {
         stopped_.store(true, std::memory_order_release);

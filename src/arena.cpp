@@ -24,16 +24,29 @@ MemoryArena::~MemoryArena() {
 }
 
 uint8_t* MemoryArena::allocate(size_t bytes) {
-    // 256-byte alignment is generally good for GPU architectures
-    size_t alignment = 256;
-    size_t aligned_bytes = (bytes + alignment - 1) & ~(alignment - 1);
-
-    if (offset + aligned_bytes > capacity) {
-        throw std::runtime_error("OOM: MemoryArena capacity exceeded during allocation.");
+    // Hard upper bound: refuse requests larger than arena capacity
+    if (bytes == 0 || bytes > capacity) {
+        throw std::runtime_error("OOM: Requested allocation exceeds arena capacity.");
     }
 
+    // Safe alignment calculation — guard bytes + (alignment - 1) against wrap-around
+    constexpr size_t alignment = 256;
+    constexpr size_t align_mask = alignment - 1;
+    size_t aligned_bytes;
+    if (bytes > SIZE_MAX - align_mask) {
+        throw std::runtime_error("OOM: Integer overflow computing aligned allocation size.");
+    }
+    aligned_bytes = (bytes + align_mask) & ~align_mask;
+
+    // Guard offset accumulation against overflow
+    size_t new_offset;
+    if (capacity < aligned_bytes || offset > capacity - aligned_bytes) {
+        throw std::runtime_error("OOM: MemoryArena capacity exceeded during allocation.");
+    }
+    new_offset = offset + aligned_bytes;
+
     uint8_t* ptr = base_ptr + offset;
-    offset += aligned_bytes;
+    offset = new_offset;
     return ptr;
 }
 

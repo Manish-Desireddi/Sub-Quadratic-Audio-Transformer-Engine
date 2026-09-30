@@ -1,17 +1,36 @@
 [build-system]
-requires = ["setuptools>=42", "wheel", "cmake>=3.15", "pybind11>=2.12.0"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.9.0", "pybind11>=2.12.0"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "subq_audio"
 version = "0.1.0"
 description = "A Bare-Metal, Lock-Free O(N) Attention Engine for Infinite Continuous Audio Streaming"
-authors = [
-    { name="Manish-Desireddi", email="manishdesireddi@gmail.com" }
-]
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = [
-    "numpy",
-    "torch"
+authors = [
+    { name = "Manish-Desireddi", email = "manishdesireddi@gmail.com" }
 ]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: C++",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+dependencies = [
+    "numpy>=1.24.0",
+    "torch>=2.0.0"
+]
+
+[tool.scikit-build]
+cmake.version = ">=3.24"
+cmake.build-type = "Release"
+wheel.packages = ["python/subq_audio"]
+[tool.scikit-build.cmake.define]
+BUILD_TESTS = "OFF"
+BUILD_CLI = "OFF"

@@ -1,5 +1,7 @@
 # Build Artifacts
 build/
+build_cli/
+build_python/
 build_linux/
 dist/
 __pycache__/

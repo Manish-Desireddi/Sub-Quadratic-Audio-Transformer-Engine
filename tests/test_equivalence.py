@@ -15,7 +15,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(os.path.join(parent_dir, "python"))
 
 import subq_engine
-from reference import linear_attention_forward
+from .reference import linear_attention_forward
 
 def test_forward_equivalence(real_audio):
     batch = 1

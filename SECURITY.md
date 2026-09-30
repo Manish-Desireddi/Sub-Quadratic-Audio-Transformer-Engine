@@ -6,8 +6,8 @@ Currently, only the latest release (`main` branch / `v1.x`) receives security up
 
 | Version | Supported          |
 | ------- | ------------------ |
-| v1.0.x  | :white_check_mark: |
-| < 1.0   | :x:                |
+| v0.1.x  | :white_check_mark: |
+| < 0.1   | :x:                |
 
 ## Reporting a Vulnerability
 
@@ -15,7 +15,7 @@ Because this engine operates at the bare-metal level using direct `mmap` ingesti
 
 **DO NOT OPEN A PUBLIC GITHUB ISSUE FOR SECURITY VULNERABILITIES.**
 
-If you discover a security vulnerability within this project, please send an e-mail to the maintainers (or reach out via direct message if an email is not provided in the maintainer's GitHub profile).
+If you discover a security vulnerability within this project, please send an e-mail to the maintainers at manishdesireddi@gmail.com
 
 ### What to Include in Your Report
 Please provide a detailed report including:

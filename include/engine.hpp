@@ -7,6 +7,7 @@
 
 #pragma once
 #include "attention.hpp"
+#include "kernels.hpp"
 #include "arena.hpp"
 
 class Engine {
@@ -14,6 +15,8 @@ public:
     Engine(MemoryArena& arena);
     void forward(AttentionContext& ctx);
     void backward(AttentionContext& ctx);
+    void backward(subq::AttentionBackwardContext<float>& ctx);
+    void backward(subq::AttentionBackwardContext<double>& ctx);
 private:
     MemoryArena& arena_;
 };

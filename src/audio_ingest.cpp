@@ -18,20 +18,31 @@ std::vector<float> load_wav(const std::string& filepath) {
         throw std::runtime_error("Failed to open audio file: " + filepath);
     }
 
-    // Only process mono or stereo for now
-    if (sfinfo.channels > 2) {
+    // Sanity-check channel count before any multiplication
+    if (sfinfo.channels <= 0 || sfinfo.channels > 2) {
         sf_close(infile);
         throw std::runtime_error("Audio ingestion currently supports up to 2 channels.");
     }
 
-    std::vector<float> buffer(sfinfo.frames * sfinfo.channels);
-    sf_count_t num_read = sf_read_float(infile, buffer.data(), buffer.size());
-    
-    if (num_read != buffer.size()) {
+    // Sanity-check frame count — cap at 30 minutes of 48 kHz stereo (~87M frames)
+    constexpr sf_count_t kMaxFrames = 87'000'000LL;
+    if (sfinfo.frames <= 0 || sfinfo.frames > kMaxFrames) {
+        sf_close(infile);
+        throw std::runtime_error("Audio file frame count out of acceptable range.");
+    }
+
+    // Safe multiplication: both operands are now known-bounded
+    const size_t total_samples = static_cast<size_t>(sfinfo.frames) * static_cast<size_t>(sfinfo.channels);
+
+    std::vector<float> buffer(total_samples);
+    sf_count_t num_read = sf_read_float(infile, buffer.data(), static_cast<sf_count_t>(buffer.size()));
+
+    if (num_read != static_cast<sf_count_t>(buffer.size())) {
         std::cerr << "Warning: Expected to read " << buffer.size() << " floats, but read " << num_read << "\n";
-        buffer.resize(num_read);
+        buffer.resize(static_cast<size_t>(num_read));
     }
 
     sf_close(infile);
     return buffer;
 }
+

@@ -16,3 +16,11 @@ void Engine::forward(AttentionContext& ctx) {
 void Engine::backward(AttentionContext& ctx) {
     run_attention_backward(ctx);
 }
+
+void Engine::backward(subq::AttentionBackwardContext<float>& ctx) {
+    subq::run_attention_backward_raw(ctx);
+}
+
+void Engine::backward(subq::AttentionBackwardContext<double>& ctx) {
+    subq::run_attention_backward_raw(ctx);
+}
