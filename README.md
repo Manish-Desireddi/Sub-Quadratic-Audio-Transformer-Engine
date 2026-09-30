@@ -31,7 +31,7 @@ The Sub-Quadratic Engine is aggressively optimized with **Zero-Copy memory inges
 
 ## Architecture Flow
 For a deep-dive into the mathematical theories and memory allocation strategies, read the full **[Architecture Document](Architecture.md)**.
-`mermaid
+```mermaid
 graph TD
     subgraph Host[Host CPU & Memory]
         A[libsndfile Audio Stream] -->|Chunking 262k samples| B(1D Conv Feature Extractor)
@@ -56,7 +56,7 @@ graph TD
     subgraph API[Python API]
         J -->|pybind11 FFI Boundary| K[Frictionless Numpy/Torch Tensors]
     end
-`
+```
 
 ## Quickstart & Python Frictionless API
 We provide a polished, single-line Python API for researchers and developers to instantly tap into the bare-metal C++ engine.
