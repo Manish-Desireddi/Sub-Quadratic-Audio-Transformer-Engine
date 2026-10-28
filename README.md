@@ -62,9 +62,9 @@ graph TD
 ## Quickstart & Python Frictionless API
 We provide a polished, single-line Python API for researchers and developers to instantly tap into the bare-metal C++ engine.
 
-```bash
-git clone https://github.com/Manish-Desireddi/SubQuadraticNeuralNetwork.git
-cd SubQuadraticNeuralNetwork
+`ash
+git clone https://github.com/Manish-Desireddi/Sub-Quadratic-Audio-Transformer-Engine.git
+cd Sub-Quadratic-Audio-Transformer-Engine
 python -m venv venv
 venv\Scripts\activate # Windows
 # For NVIDIA CUDA (Default) or CPU Fallback
