@@ -11,6 +11,10 @@
 #include <cstdint>
 #include <cmath>
 
+#if defined(_MSC_VER) && !defined(__restrict__)
+#define __restrict__ __restrict
+#endif
+
 namespace subq {
 
 template <typename T>

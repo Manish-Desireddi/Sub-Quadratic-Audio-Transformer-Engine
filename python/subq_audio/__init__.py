@@ -8,8 +8,20 @@ from typing import List, Optional
 
 from . import _C
 from ._C import SubQEngine, get_device_info
-from .engine import AudioTransformerEngine
-from .autograd import SubQAttentionFunction, SubQuadraticAttention
+from .engine import (
+    AudioTransformerEngine,
+    setup_distributed,
+    cleanup_distributed,
+    wrap_model_ddp,
+    create_distributed_dataloader,
+)
+from .autograd import SubQAttentionFunction, SubQuadraticAttention, SubQLinearAttention
+from .surgery import (
+    bypass_transformer_with_subq,
+    LayerWiseDistillationTrainer,
+    SubQBypassAttention,
+    SubQAttentionOutput,
+)
 
 # Compatibility alias for legacy scripts importing subq_engine
 sys.modules.setdefault("subq_engine", _C)
@@ -45,7 +57,16 @@ __all__: List[str] = [
     "AudioTransformerEngine",
     "Engine",
     "SubQuadraticAttention",
+    "SubQLinearAttention",
     "SubQAttentionFunction",
+    "bypass_transformer_with_subq",
+    "LayerWiseDistillationTrainer",
+    "SubQBypassAttention",
+    "SubQAttentionOutput",
+    "setup_distributed",
+    "cleanup_distributed",
+    "wrap_model_ddp",
+    "create_distributed_dataloader",
     "load",
     "generate",
     "__version__",

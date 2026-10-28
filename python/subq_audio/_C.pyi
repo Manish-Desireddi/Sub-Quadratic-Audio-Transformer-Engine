@@ -25,13 +25,19 @@ class SubQEngine:
     Core C++ execution engine managing the aligned hardware MemoryArena
     and causal associative scan linear attention kernels.
     """
-    def __init__(self, vram_capacity: int = 268435456) -> None:
+    def __init__(self, vram_capacity: int = 268435456, device_id: int = 0) -> None:
         """
         Initialize the Sub-Quadratic Engine.
         
         Args:
             vram_capacity: Total MemoryArena capacity in bytes (default: 256MB).
+            device_id: Physical GPU device index (default: 0).
         """
+        ...
+
+    @property
+    def device_id(self) -> int:
+        """Physical GPU device ID for isolated VRAM arena."""
         ...
 
     def load(self, filepath: str) -> None:

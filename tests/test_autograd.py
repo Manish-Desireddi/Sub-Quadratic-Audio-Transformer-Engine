@@ -1,8 +1,8 @@
 # 
 # Copyright (c) 2026 Manish. All rights reserved.
 # 
-# This work is licensed under the terms of the GNU GPLv3 license.  
-# For a copy, see <https://www.gnu.org/licenses/>.
+# This work is licensed under the terms of the MIT license.
+# For a copy, see <https://opensource.org/licenses/MIT>.
 # 
 
 import pytest
@@ -348,3 +348,88 @@ def test_stacked_layers_backprop():
 
     assert x.grad is not None
     assert not torch.isnan(x.grad).any()
+
+
+# ==============================================================================
+# 5. O(1) Memory & Data-Dependent Gating Verification
+# ==============================================================================
+
+def test_saved_tensors_o1_memory_no_s_traj():
+    """
+    Verify that SubQAttentionFunction preserves strict O(1) memory by not saving
+    4D state trajectory tensors (S_traj of shape [B, T, D, D]) in ctx.saved_tensors.
+    """
+    B, T, D = 2, 128, 8
+    q = torch.randn(B, T, D, requires_grad=True)
+    k = torch.randn(B, T, D, requires_grad=True)
+    v = torch.randn(B, T, D, requires_grad=True)
+    w = torch.tensor(1.5, requires_grad=True)
+
+    out = SubQAttentionFunction.apply(q, k, v, w)
+    saved = out.grad_fn.saved_tensors
+
+    # Saved tensors must only be (q_flat, k_flat, v_flat, decay_w_tensor)
+    assert len(saved) == 4, f"Expected 4 saved tensors, got {len(saved)}"
+    for t in saved:
+        # None of the saved tensors may have ndim >= 4 or contain T*D*D elements
+        assert t.ndim <= 3, f"Unexpected high-dimensional tensor in saved_tensors: shape {t.shape}"
+        assert t.numel() <= B * T * D, f"Tensor exceeds input size bound: {t.shape}"
+
+    loss = out.sum()
+    loss.backward()
+    assert q.grad is not None and not torch.isnan(q.grad).any()
+
+
+def test_data_dependent_gating_gradients():
+    """
+    Verify that SubQLinearAttention with data-dependent gating propagates non-zero
+    gradients to gate_proj.weight, gate_proj.bias, and raw_decay.
+    """
+    torch.manual_seed(42)
+    B, T, hidden_size, num_heads = 2, 16, 32, 4
+    attn_dynamic = SubQLinearAttention(
+        hidden_size=hidden_size,
+        num_heads=num_heads,
+        bias=True,
+        use_data_dependent_gating=True,
+    )
+
+    x = torch.randn(B, T, hidden_size, requires_grad=True)
+    out, _ = attn_dynamic(x)
+    loss = out.sum()
+    loss.backward()
+
+    assert attn_dynamic.gate_proj is not None
+    assert attn_dynamic.gate_proj.weight.grad is not None
+    assert attn_dynamic.gate_proj.weight.grad.abs().sum() > 0
+    assert attn_dynamic.gate_proj.bias.grad is not None
+    assert attn_dynamic.gate_proj.bias.grad.abs().sum() > 0
+    assert attn_dynamic.raw_decay.grad is not None
+    assert attn_dynamic.raw_decay.grad.abs().sum() > 0
+    assert x.grad is not None and not torch.isnan(x.grad).any()
+
+
+def test_gradcheck_dynamic_decay():
+    """
+    Verify analytical backward pass accuracy under data-dependent gating using gradcheck.
+    """
+    torch.manual_seed(123)
+    B, T, D = 2, 6, 4
+    dtype = torch.float64
+
+    q = torch.randn(B, T, D, dtype=dtype, requires_grad=True)
+    k = torch.randn(B, T, D, dtype=dtype, requires_grad=True)
+    v = torch.randn(B, T, D, dtype=dtype, requires_grad=True)
+    # Dynamic 2D decay per sequence item [B, T]
+    w = torch.randn(B, T, dtype=dtype, requires_grad=True)
+
+    passed = gradcheck(
+        SubQAttentionFunction.apply,
+        (q, k, v, w),
+        eps=1e-6,
+        atol=1e-4,
+        rtol=1e-3,
+        raise_exception=True,
+    )
+    assert passed, "Dynamic decay gradcheck failed"
+

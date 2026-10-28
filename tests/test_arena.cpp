@@ -1,8 +1,8 @@
 /* 
  * Copyright (c) 2026 Manish. All rights reserved.
  * 
- * This work is licensed under the terms of the GNU GPLv3 license.  
- * For a copy, see <https://www.gnu.org/licenses/>.
+ * This work is licensed under the terms of the MIT license.
+ * For a copy, see <https://opensource.org/licenses/MIT>.
  */
 
 #include <catch2/catch_test_macros.hpp>
@@ -151,9 +151,13 @@ TEST_CASE("MemoryArena exhaustive alignment boundaries stress test", "[MemoryAre
 
         // Verify write and read integrity at boundaries
         ptr[0] = static_cast<uint8_t>(sz & 0xFF);
-        ptr[sz - 1] = static_cast<uint8_t>((sz * 3) & 0xFF);
+        if (sz > 1) {
+            ptr[sz - 1] = static_cast<uint8_t>((sz * 3) & 0xFF);
+        }
         REQUIRE(ptr[0] == static_cast<uint8_t>(sz & 0xFF));
-        REQUIRE(ptr[sz - 1] == static_cast<uint8_t>((sz * 3) & 0xFF));
+        if (sz > 1) {
+            REQUIRE(ptr[sz - 1] == static_cast<uint8_t>((sz * 3) & 0xFF));
+        }
     }
 }
 

@@ -26,6 +26,7 @@ option(USE_ROCM "Use AMD ROCm/HIP instead of NVIDIA CUDA" OFF)
 option(FORCE_CPU "Force CPU fallback, disabling GPU support" OFF)
 option(BUILD_TESTS "Build C++ unit tests" ON)
 option(BUILD_CLI "Build standalone C++ CLI tool" ON)
+option(SUBQ_ENABLE_WEBSOCKET_INGEST "Enable optional WebSocket live network streaming ingestion" ON)
 
 include(CheckLanguage)
 
@@ -112,17 +113,25 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(cli11)
 
-# 5. Fetch IXWebSocket (Live Network Data Ingestion)
-set(USE_TLS OFF CACHE BOOL "Enable TLS/SSL support in IXWebSocket" FORCE)
-set(USE_ZLIB OFF CACHE BOOL "Disable ZLIB in IXWebSocket for low latency raw PCM streaming" FORCE)
-set(USE_WS OFF CACHE BOOL "Do not build IXWebSocket CLI tool" FORCE)
+# 5. Fetch IXWebSocket (Live Network Data Ingestion - Optional Component)
+if(SUBQ_ENABLE_WEBSOCKET_INGEST)
+    set(USE_TLS OFF CACHE BOOL "Enable TLS/SSL support in IXWebSocket" FORCE)
+    set(USE_ZLIB OFF CACHE BOOL "Disable ZLIB in IXWebSocket for low latency raw PCM streaming" FORCE)
+    set(USE_WS OFF CACHE BOOL "Do not build IXWebSocket CLI tool" FORCE)
 
-FetchContent_Declare(
-  ixwebsocket
-  GIT_REPOSITORY https://github.com/machinezone/IXWebSocket.git
-  GIT_TAG        v12.0.1
-)
-FetchContent_MakeAvailable(ixwebsocket)
+    FetchContent_Declare(
+      ixwebsocket
+      GIT_REPOSITORY https://github.com/machinezone/IXWebSocket.git
+      GIT_TAG        v12.0.1
+    )
+    FetchContent_MakeAvailable(ixwebsocket)
+    add_compile_definitions(SUBQ_ENABLE_WEBSOCKET_INGEST=1)
+    set(WEBSOCKET_SRC src/network_ingest.cpp)
+    set(WEBSOCKET_LIB ixwebsocket::ixwebsocket)
+else()
+    set(WEBSOCKET_SRC "")
+    set(WEBSOCKET_LIB "")
+endif()
 
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -131,7 +140,6 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(SRC_FILES
     src/sha256.cpp
     src/audio_ingest.cpp
-    src/network_ingest.cpp
     src/arena.cpp
     src/kernels/feature_map.cpp
     src/kernels/attention_forward.cpp
@@ -140,6 +148,7 @@ set(SRC_FILES
     src/safetensors.cpp
     src/kernels/layer_norm.cpp
     src/kernels/ffn.cpp
+    ${WEBSOCKET_SRC}
 )
 
 if(GPU_BACKEND STREQUAL "HIP")
@@ -152,7 +161,7 @@ add_library(subq_core STATIC ${SRC_FILES})
 target_link_libraries(subq_core PUBLIC 
     sndfile 
     nlohmann_json::nlohmann_json 
-    ixwebsocket::ixwebsocket
+    ${WEBSOCKET_LIB}
 )
 
 if(WIN32)
@@ -217,8 +226,10 @@ if(BUILD_TESTS)
     add_executable(test_benchmark_audio tests/benchmark_audio.cpp)
     target_link_libraries(test_benchmark_audio PRIVATE subq_core Catch2::Catch2WithMain)
 
-    add_executable(test_network_ingest tests/test_network_ingest.cpp)
-    target_link_libraries(test_network_ingest PRIVATE subq_core Catch2::Catch2WithMain)
+    if(SUBQ_ENABLE_WEBSOCKET_INGEST)
+        add_executable(test_network_ingest tests/test_network_ingest.cpp)
+        target_link_libraries(test_network_ingest PRIVATE subq_core Catch2::Catch2WithMain)
+    endif()
 
     include(CTest)
     include(Catch)
@@ -226,5 +237,7 @@ if(BUILD_TESTS)
     catch_discover_tests(test_attention)
     catch_discover_tests(test_safetensors)
     catch_discover_tests(test_benchmark_audio)
-    catch_discover_tests(test_network_ingest)
+    if(SUBQ_ENABLE_WEBSOCKET_INGEST)
+        catch_discover_tests(test_network_ingest)
+    endif()
 endif()

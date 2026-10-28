@@ -1,8 +1,8 @@
 # 
 # Copyright (c) 2026 Manish. All rights reserved.
 # 
-# This work is licensed under the terms of the GNU GPLv3 license.  
-# For a copy, see <https://www.gnu.org/licenses/>.
+# This work is licensed under the terms of the MIT license.
+# For a copy, see <https://opensource.org/licenses/MIT>.
 # 
 
 import torch
@@ -31,12 +31,14 @@ def benchmark():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seq-len", type=int, default=512, help="Sequence length")
     parser.add_argument("--batch", type=int, default=4, help="Batch size")
+    parser.add_argument("--iters", type=int, default=50, help="Benchmark iterations")
     parser.add_argument("--engine", type=str, choices=["pytorch", "cpp", "all"], default="all", help="Which engine to run")
     args = parser.parse_args()
 
     batch = args.batch
     seq_len = args.seq_len
     d_model = 256
+    iters = args.iters
 
     print(f"Benchmarking (Batch={batch}, SeqLen={seq_len}, D_Model={d_model})")
 

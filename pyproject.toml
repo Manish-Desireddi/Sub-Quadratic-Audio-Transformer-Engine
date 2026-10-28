@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "A Bare-Metal, Lock-Free O(N) Attention Engine for Infinite Continuous Audio Streaming"
 readme = "README.md"
 requires-python = ">=3.10"
+license = { text = "MIT" }
 authors = [
     { name = "Manish-Desireddi", email = "manishdesireddi@gmail.com" }
 ]

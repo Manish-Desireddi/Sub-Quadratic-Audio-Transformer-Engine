@@ -1,17 +1,18 @@
 /* 
  * Copyright (c) 2026 Manish. All rights reserved.
  * 
- * This work is licensed under the terms of the GNU GPLv3 license.  
- * For a copy, see <https://www.gnu.org/licenses/>.
+ * This work is licensed under the terms of the MIT license.  
+ * For a copy, see <https://opensource.org/licenses/MIT>.
  */
 
 #include <catch2/catch_test_macros.hpp>
 #include "safetensors.hpp"
 #include "arena.hpp"
 #include <fstream>
+#include <vector>
 #include <cstdint>
 
-TEST_CASE("Safetensors Loader parses correct header", "[safetensors]") {
+TEST_CASE("Safetensors Loader parses correct header and maps tensors", "[safetensors]") {
     // 1. Create a dummy .safetensors file in memory/disk
     std::string dummy_file = "dummy.safetensors";
     
@@ -37,6 +38,27 @@ TEST_CASE("Safetensors Loader parses correct header", "[safetensors]") {
     bool result = loader.load(dummy_file);
     REQUIRE(result == true);
     
+    // 3. Verify has_tensor and get_tensor
+    REQUIRE(loader.has_tensor("weight") == true);
+    REQUIRE(loader.has_tensor("nonexistent") == false);
+
+    TensorDescriptor td = loader.get_tensor("weight");
+    REQUIRE(td.dimensions == std::vector<size_t>{10, 20});
+    REQUIRE(td.strides == std::vector<size_t>{20, 1});
+    REQUIRE(td.precision == PrecisionMode::FP32);
+    REQUIRE(td.data != nullptr);
+
+    // 4. Verify metadata
+    REQUIRE(loader.metadata().find("weight") != loader.metadata().end());
+    const auto& meta = loader.metadata().at("weight");
+    REQUIRE(meta.dtype == "F32");
+    REQUIRE(meta.shape == std::vector<size_t>{10, 20});
+    REQUIRE(meta.data_offset_start == 0);
+    REQUIRE(meta.data_offset_end == 800);
+
+    // 5. Verify exception for missing tensor
+    REQUIRE_THROWS_AS(loader.get_tensor("missing_layer"), std::runtime_error);
+
     // Cleanup
     std::remove(dummy_file.c_str());
 }

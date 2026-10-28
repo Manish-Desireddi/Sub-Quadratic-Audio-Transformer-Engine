@@ -1,8 +1,8 @@
 /* 
  * Copyright (c) 2026 Manish. All rights reserved.
  * 
- * This work is licensed under the terms of the GNU GPLv3 license.  
- * For a copy, see <https://www.gnu.org/licenses/>.
+ * This work is licensed under the terms of the MIT license.
+ * For a copy, see <https://opensource.org/licenses/MIT>.
  */
 
 #include "arena.hpp"
@@ -24,8 +24,12 @@ MemoryArena::~MemoryArena() {
 }
 
 uint8_t* MemoryArena::allocate(size_t bytes) {
+    if (bytes == 0) {
+        return base_ptr + offset;
+    }
+
     // Hard upper bound: refuse requests larger than arena capacity
-    if (bytes == 0 || bytes > capacity) {
+    if (bytes > capacity) {
         throw std::runtime_error("OOM: Requested allocation exceeds arena capacity.");
     }
 

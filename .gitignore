@@ -3,6 +3,7 @@ build/
 build_cli/
 build_python/
 build_linux/
+build_windows/
 dist/
 __pycache__/
 *.egg-info/
@@ -25,7 +26,6 @@ __pycache__/
 .vs/
 *.suo
 *.user
-.agents
 rules
 .gitignore
 
@@ -48,9 +48,13 @@ demo.mp4
 demo.tape
 Dockerfile.vhs
 run_demo.sh
+run_demo.ps1
 
 # Environment Tokens
 .env
 .venv
 venv/
 env/
+
+# Bundle XMLs
+repomix-output*.xml

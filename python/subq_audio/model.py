@@ -1,8 +1,8 @@
 # 
 # Copyright (c) 2026 Manish. All rights reserved.
 # 
-# This work is licensed under the terms of the GNU GPLv3 license.  
-# For a copy, see <https://www.gnu.org/licenses/>.
+# This work is licensed under the terms of the MIT license.  
+# For a copy, see <https://opensource.org/licenses/MIT>.
 # 
 
 import math
@@ -40,6 +40,7 @@ class SubQAudioConfig(PretrainedConfig):
         layer_norm_eps: float = 1e-5,
         initializer_range: float = 0.02,
         use_cache: bool = True,
+        use_data_dependent_gating: bool = True,
         pad_token_id: int = 0,
         bos_token_id: int = 1,
         eos_token_id: int = 2,
@@ -59,6 +60,7 @@ class SubQAudioConfig(PretrainedConfig):
         self.layer_norm_eps = layer_norm_eps
         self.initializer_range = initializer_range
         self.use_cache = use_cache
+        self.use_data_dependent_gating = use_data_dependent_gating
 
         super().__init__(
             pad_token_id=pad_token_id,
@@ -100,11 +102,13 @@ class SubQAudioBlock(nn.Module):
     def __init__(self, config: SubQAudioConfig):
         super().__init__()
         self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
+        use_gating = getattr(config, "use_data_dependent_gating", True)
         self.self_attn = SubQLinearAttention(
             hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
             decay_init=config.decay_init,
             bias=False,
+            use_data_dependent_gating=use_gating,
         )
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.mlp = SubQAudioMLP(config)
@@ -113,11 +117,14 @@ class SubQAudioBlock(nn.Module):
         self,
         hidden_states: torch.Tensor,
         past_state: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         use_cache: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         # Pre-LayerNorm Attention with residual
         normed = self.input_layernorm(hidden_states)
-        attn_out, next_state = self.self_attn(normed, past_state=past_state, use_cache=use_cache)
+        attn_out, next_state = self.self_attn(
+            normed, past_state=past_state, attention_mask=attention_mask, use_cache=use_cache
+        )
         hidden_states = hidden_states + attn_out
 
         # Pre-LayerNorm MLP with residual
@@ -135,6 +142,11 @@ class SubQAudioPreTrainedModel(PreTrainedModel):
     config_class = SubQAudioConfig
     base_model_prefix = "model"
     supports_gradient_checkpointing = True
+
+    @classmethod
+    def _supports_default_dynamic_cache(cls) -> bool:
+        """Sub-Quadratic models use linear recurrent state matrix tuples for O(1) memory."""
+        return False
 
     def _init_weights(self, module):
         std = self.config.initializer_range
@@ -169,12 +181,15 @@ class SubQAudioModel(SubQAudioPreTrainedModel):
         self,
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
+        use_cache: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         **kwargs,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if input_ids is not None and inputs_embeds is not None:
@@ -187,11 +202,17 @@ class SubQAudioModel(SubQAudioPreTrainedModel):
             raise ValueError("You have to specify either input_ids or inputs_embeds")
 
         all_hidden_states = () if output_hidden_states else None
+        next_decoder_cache = () if use_cache else None
 
-        for layer in self.layers:
+        for idx, layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
-            hidden_states, _ = layer(hidden_states)
+            layer_past = past_key_values[idx] if past_key_values is not None else None
+            hidden_states, next_state = layer(
+                hidden_states, past_state=layer_past, attention_mask=attention_mask, use_cache=use_cache
+            )
+            if use_cache:
+                next_decoder_cache += (next_state,)
 
         hidden_states = self.norm(hidden_states)
 
@@ -199,10 +220,11 @@ class SubQAudioModel(SubQAudioPreTrainedModel):
             all_hidden_states += (hidden_states,)
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, all_hidden_states] if v is not None)
+            return tuple(v for v in [hidden_states, next_decoder_cache, all_hidden_states] if v is not None)
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
+            past_key_values=next_decoder_cache,
             hidden_states=all_hidden_states,
         )
 
@@ -235,8 +257,10 @@ class SubQAudioForCausalLM(SubQAudioPreTrainedModel, GenerationMixin):
         self,
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         **kwargs,
@@ -246,7 +270,9 @@ class SubQAudioForCausalLM(SubQAudioPreTrainedModel, GenerationMixin):
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
             output_hidden_states=output_hidden_states,
             return_dict=True,
         )
@@ -266,16 +292,23 @@ class SubQAudioForCausalLM(SubQAudioPreTrainedModel, GenerationMixin):
             )
 
         if not return_dict:
-            output = (logits,) + outputs[1:]
+            output = (logits, outputs.past_key_values) + outputs[2:]
             return ((loss,) + output) if loss is not None else output
 
         return CausalLMOutputWithPast(
             loss=loss,
             logits=logits,
+            past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
         )
 
     def prepare_inputs_for_generation(
-        self, input_ids: torch.LongTensor, **kwargs
+        self, input_ids: torch.LongTensor, past_key_values=None, **kwargs
     ) -> dict:
-        return {"input_ids": input_ids}
+        if past_key_values is not None:
+            input_ids = input_ids[:, -1:]
+        return {
+            "input_ids": input_ids,
+            "past_key_values": past_key_values,
+            "use_cache": kwargs.get("use_cache", True),
+        }

@@ -7,16 +7,109 @@
 
 #pragma once
 #include <vector>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <stdexcept>
 #include <thread>
 #include <chrono>
+#include <algorithm>
+#include <iterator>
 
-// Represents a chunk of raw PCM float audio data
+constexpr size_t AUDIO_CHUNK_CAPACITY = 16384;
+
+// Fixed-capacity static audio buffer eliminating all heap malloc/free during streaming
+template <size_t MaxSamples = AUDIO_CHUNK_CAPACITY>
+class StaticAudioBuffer {
+public:
+    StaticAudioBuffer() noexcept : size_(0) {}
+
+    StaticAudioBuffer(std::initializer_list<float> init) noexcept : size_(0) {
+        assign(init.begin(), init.end());
+    }
+
+    StaticAudioBuffer(const std::vector<float>& vec) noexcept : size_(0) {
+        assign(vec.begin(), vec.end());
+    }
+
+    StaticAudioBuffer& operator=(const std::vector<float>& vec) {
+        assign(vec.begin(), vec.end());
+        return *this;
+    }
+
+    template <typename InputIt>
+    void assign(InputIt first, InputIt last) {
+        size_t n = static_cast<size_t>(std::distance(first, last));
+        if (n > MaxSamples) {
+            n = MaxSamples;
+        }
+        std::copy(first, first + n, data_.begin());
+        size_ = n;
+    }
+
+    void assign(size_t n, float val) {
+        resize(n, val);
+    }
+
+    void resize(size_t n, float val = 0.0f) {
+        if (n > MaxSamples) {
+            n = MaxSamples;
+        }
+        if (n > size_) {
+            std::fill(data_.begin() + size_, data_.begin() + n, val);
+        }
+        size_ = n;
+    }
+
+    void push_back(float val) noexcept {
+        if (size_ < MaxSamples) {
+            data_[size_++] = val;
+        }
+    }
+
+    void clear() noexcept {
+        size_ = 0;
+    }
+
+    [[nodiscard]] size_t size() const noexcept { return size_; }
+    [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
+    [[nodiscard]] constexpr size_t capacity() const noexcept { return MaxSamples; }
+    [[nodiscard]] constexpr size_t max_size() const noexcept { return MaxSamples; }
+
+    float* data() noexcept { return data_.data(); }
+    const float* data() const noexcept { return data_.data(); }
+
+    float& operator[](size_t idx) noexcept { return data_[idx]; }
+    const float& operator[](size_t idx) const noexcept { return data_[idx]; }
+
+    float& at(size_t idx) {
+        if (idx >= size_) throw std::out_of_range("StaticAudioBuffer out of range");
+        return data_[idx];
+    }
+    const float& at(size_t idx) const {
+        if (idx >= size_) throw std::out_of_range("StaticAudioBuffer out of range");
+        return data_[idx];
+    }
+
+    float* begin() noexcept { return data_.data(); }
+    float* end() noexcept { return data_.data() + size_; }
+    const float* begin() const noexcept { return data_.data(); }
+    const float* end() const noexcept { return data_.data() + size_; }
+
+    bool operator==(const StaticAudioBuffer& other) const noexcept {
+        if (size_ != other.size_) return false;
+        return std::equal(begin(), end(), other.begin());
+    }
+
+private:
+    std::array<float, MaxSamples> data_{};
+    size_t size_{0};
+};
+
+// Represents a chunk of raw PCM float audio data with fixed static capacity
 struct AudioChunk {
-    std::vector<float> samples;
-    uint64_t timestamp;
+    StaticAudioBuffer<AUDIO_CHUNK_CAPACITY> samples;
+    uint64_t timestamp{0};
 };
 
 // Thread-safe lock-free ring-buffer for high-throughput asynchronous audio ingestion

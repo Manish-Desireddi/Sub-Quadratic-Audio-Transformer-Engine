@@ -2,14 +2,14 @@
 
 # Sub-Quadratic Audio Transformer Engine
 
-A Bare-Metal, Lock-Free $O(N) Attention Engine for Infinite Continuous Audio Streaming.
+A Bare-Metal, Lock-Free $O(N)$ Attention Engine for Infinite Continuous Audio Streaming.
 
 [![C++20](https://img.shields.io/badge/C++-20-blue.svg)](https://isocpp.org/)
 [![CUDA](https://img.shields.io/badge/CUDA-12.0+-green.svg)](https://developer.nvidia.com/cuda-zone)
 [![ROCm](https://img.shields.io/badge/ROCm-6.0+-red.svg)](https://rocm.docs.amd.com/en/latest/)
 [![Apple Silicon](https://img.shields.io/badge/Apple_Silicon-M1/M2/M3-lightgrey.svg)](https://developer.apple.com/metal/)
 [![Intel/AMD CPU](https://img.shields.io/badge/CPU-Intel_|_AMD-blue.svg)](https://isocpp.org/)
-[![License: GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 </div>
 
@@ -25,7 +25,7 @@ The Sub-Quadratic Engine is aggressively optimized with **Zero-Copy memory inges
 | Architecture | Latency (TTFC) | Notes |
 | :--- | :--- | :--- |
 | **Our Sub-Quadratic C++ Engine** | **~37.13 ms** | Pure Native Zero-Copy Execution (No Pybind H2D overhead, ~27.6k tokens/sec) |
-| **Our Sub-Quadratic Python FFI** | **~37.22 ms** | Frictionless Python API execution with true $O(1) scaling up to 131,072 context lengths |
+| **Our Sub-Quadratic Python FFI** | **~37.22 ms** | Frictionless Python API execution with true $O(1)$ scaling up to 131,072 context lengths |
 | PyTorch Linear Ref Loop | ~70.07 ms | Pure Python baseline reference |
 *(Note: As $N$ scales, standard attention blows up to seconds/OOM, whereas our engine remains strictly linear).*
 
@@ -46,7 +46,8 @@ graph TD
         E -->|HIPCC| G[ROCm L1 SRAM __shared__ Tiling]
         E -->|Metal/CPU| G2[Apple/Intel/AMD Thread Tiling]
         
-        F --> H((O N Causal Associative Scan))
+        H((O N Causal Associative Scan))
+        F --> H
         G --> H
         G2 --> H
         
@@ -61,18 +62,18 @@ graph TD
 ## Quickstart & Python Frictionless API
 We provide a polished, single-line Python API for researchers and developers to instantly tap into the bare-metal C++ engine.
 
-`ash
-git clone https://github.com/Manish-Desireddi/Sub-Quadratic-Audio-Transformer-Engine.git
-cd Sub-Quadratic-Audio-Transformer-Engine
+```bash
+git clone https://github.com/Manish-Desireddi/SubQuadraticNeuralNetwork.git
+cd SubQuadraticNeuralNetwork
 python -m venv venv
 venv\Scripts\activate # Windows
 # For NVIDIA CUDA (Default) or CPU Fallback
 pip install -e .
 # For AMD ROCm/HIP parity
 USE_ROCM=1 pip install -e .
-`
+```
 
-`python
+```python
 import numpy as np
 import subq_audio
 
@@ -83,7 +84,7 @@ Q = np.random.rand(1, 1024, 256).astype(np.float32)
 K = np.random.rand(1, 1024, 256).astype(np.float32)
 V = np.random.rand(1, 1024, 256).astype(np.float32)
 output = engine.forward(Q, K, V)
-`
+```
 
 ## Features
 
@@ -109,5 +110,9 @@ output = engine.forward(Q, K, V)
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| ram_capacity | Static Bytes allocated for Engine memory | 256 * 1024 * 1024 |
-| decay_factor | Temporal EMA decay coefficient for numerical bounds | 
+| `vram_capacity` | Static bytes allocated for Engine memory arena | `256 * 1024 * 1024` (256 MB) |
+| `decay_factor` | Temporal EMA decay coefficient for numerical bounds | `0.99` |
+
+## License
+
+This project is licensed under the terms of the [MIT License](LICENSE).

@@ -1,14 +1,15 @@
 /*
  * Copyright (c) 2026 Manish. All rights reserved.
  *
- * This work is licensed under the terms of the GNU GPLv3 license.
- * For a copy, see <https://www.gnu.org/licenses/>.
+ * This work is licensed under the terms of the MIT license.
+ * For a copy, see <https://opensource.org/licenses/MIT>.
  */
 
 #include "safetensors.hpp"
 #include "gpu_macros.hpp"
 #include "sha256.hpp"
 #include <iostream>
+#include <cstring>
 #include <nlohmann/json.hpp>
 
 #ifdef _WIN32
@@ -18,7 +19,6 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
 #endif
 
 using json = nlohmann::json;
@@ -28,6 +28,8 @@ SafetensorLoader::SafetensorLoader(MemoryArena &arena)
 
 bool SafetensorLoader::load(const std::string &filepath) {
   filepath_ = filepath;
+  metadata_map_.clear();
+  tensors_.clear();
 
   size_t file_size = 0;
   uint8_t *mapped_data = nullptr;
@@ -71,8 +73,6 @@ bool SafetensorLoader::load(const std::string &filepath) {
   if (!mapped_data || file_size < 8)
     return false;
 
-
-
   // Security: Compute SHA-256 Hash
   SHA256 sha;
   sha.update(mapped_data, file_size);
@@ -81,8 +81,7 @@ bool SafetensorLoader::load(const std::string &filepath) {
   // Parse Header
   uint64_t header_size = *reinterpret_cast<uint64_t *>(mapped_data);
 
-  // Security : Prevent Integer Overflow (CWE-190) wrapping the buffer
-  // boundaries
+  // Security: Prevent Integer Overflow (CWE-190) wrapping the buffer boundaries
   if (file_size < 8 || header_size > (file_size - 8)) {
     std::cerr
         << "[Security] Invalid header size: Buffer overflow attempt detected!"
@@ -108,6 +107,7 @@ bool SafetensorLoader::load(const std::string &filepath) {
         continue;
 
       auto &tensor = el.value();
+      std::string dtype = tensor.value("dtype", "F32");
       std::vector<size_t> shape = tensor["shape"].get<std::vector<size_t>>();
 
       if (shape.size() > 4) {
@@ -117,7 +117,7 @@ bool SafetensorLoader::load(const std::string &filepath) {
       std::vector<size_t> offsets =
           tensor["data_offsets"].get<std::vector<size_t>>();
 
-      // Security : Prevent Integer Underflow/Overflow on offsets (CWE-191)
+      // Security: Prevent Integer Underflow/Overflow on offsets (CWE-191)
       if (offsets.size() != 2 || offsets[0] > offsets[1]) {
         throw std::runtime_error("Invalid data offsets in header.");
       }
@@ -126,19 +126,55 @@ bool SafetensorLoader::load(const std::string &filepath) {
             "Data offsets exceed file size boundaries or overflowed.");
       }
 
+      // Compute contiguous row-major strides
+      std::vector<size_t> strides(shape.size());
+      if (!shape.empty()) {
+        strides.back() = 1;
+        for (int i = static_cast<int>(shape.size()) - 2; i >= 0; --i) {
+          strides[i] = strides[i + 1] * shape[i + 1];
+        }
+      }
+
+      // Map dtype string to precision enum
+      PrecisionMode prec = PrecisionMode::FP32;
+      if (dtype == "F16") {
+        prec = PrecisionMode::FP16;
+      } else if (dtype == "BF16") {
+        prec = PrecisionMode::BF16;
+      }
+
+      // Store metadata
+      SafetensorMetadata meta;
+      meta.dtype = dtype;
+      meta.shape = shape;
+      meta.data_offset_start = offsets[0];
+      meta.data_offset_end = offsets[1];
+      metadata_map_[el.key()] = meta;
+
       // Zero-Copy Mapped loading to Arena
       size_t tensor_bytes = (offsets[1] - offsets[0]);
       void *d_ptr = arena_.allocate(tensor_bytes);
 
-      // Map directly from host RAM (mmap) to GPU VRAM
+      // Map directly from host RAM (mmap) to GPU VRAM or host memory
 #if defined(USE_CUDA) || defined(USE_HIP)
       CHECK_GPU_ERROR(gpuMemcpy(d_ptr,
                                 mapped_data + data_start_offset_ + offsets[0],
                                 tensor_bytes, gpuMemcpyHostToDevice));
+      bool on_host = false;
 #else
       std::memcpy(d_ptr, mapped_data + data_start_offset_ + offsets[0],
                   tensor_bytes);
+      bool on_host = true;
 #endif
+
+      // Store registered TensorDescriptor
+      TensorDescriptor td;
+      td.dimensions = shape;
+      td.strides = strides;
+      td.precision = prec;
+      td.data = d_ptr;
+      td.is_on_host = on_host;
+      tensors_[el.key()] = td;
     }
 
   } catch (const std::exception &e) {
@@ -160,7 +196,14 @@ bool SafetensorLoader::load(const std::string &filepath) {
   return true;
 }
 
-TensorDescriptor SafetensorLoader::get_tensor(const std::string &name) {
-  TensorDescriptor td;
-  return td;
+bool SafetensorLoader::has_tensor(const std::string &name) const {
+  return tensors_.find(name) != tensors_.end();
+}
+
+TensorDescriptor SafetensorLoader::get_tensor(const std::string &name) const {
+  auto it = tensors_.find(name);
+  if (it == tensors_.end()) {
+    throw std::runtime_error("Tensor '" + name + "' not found in SafetensorLoader.");
+  }
+  return it->second;
 }

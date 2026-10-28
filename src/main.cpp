@@ -1,8 +1,8 @@
 /*
  * Copyright (c) 2026 Manish. All rights reserved.
  *
- * This work is licensed under the terms of the GNU GPLv3 license.
- * For a copy, see <https://www.gnu.org/licenses/>.
+ * This work is licensed under the terms of the MIT license.
+ * For a copy, see <https://opensource.org/licenses/MIT>.
  */
 
 #include <atomic>
@@ -476,6 +476,7 @@ int main(int argc, char **argv) {
   std::unique_ptr<subq::INetworkAudioReceiver> net_receiver = nullptr;
   std::thread producer;
 
+#ifdef SUBQ_ENABLE_WEBSOCKET_INGEST
   if (!ws_url.empty()) {
     std::cout << "[Network Ingestion] Connecting to WebSocket: " << ws_url
               << "\n";
@@ -490,7 +491,14 @@ int main(int argc, char **argv) {
           << "[Network Ingestion Error] Failed to start WebSocket receiver.\n";
       return 1;
     }
-  } else if (!input_file.empty()) {
+  } else
+#else
+  if (!ws_url.empty()) {
+    std::cerr << "[Error] WebSocket streaming ingest is disabled in this build. Recompile with -DSUBQ_ENABLE_WEBSOCKET_INGEST=ON.\n";
+    return 1;
+  } else
+#endif
+  if (!input_file.empty()) {
     producer = std::thread(wav_producer, std::ref(ring_buffer), input_file,
                            seq_len, sample_rate, benchmark_mode, verbose);
   } else if (use_stdin) {

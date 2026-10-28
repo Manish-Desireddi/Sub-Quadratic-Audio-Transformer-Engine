@@ -1,8 +1,8 @@
 /* 
  * Copyright (c) 2026 Manish. All rights reserved.
  * 
- * This work is licensed under the terms of the GNU GPLv3 license.  
- * For a copy, see <https://www.gnu.org/licenses/>.
+ * This work is licensed under the terms of the MIT license.
+ * For a copy, see <https://opensource.org/licenses/MIT>.
  */
 
 #include "network_ingest.hpp"
@@ -169,6 +169,17 @@ private:
             const NetworkAudioHeader* hdr = reinterpret_cast<const NetworkAudioHeader*>(data);
             if (hdr->magic == SUBQ_HEADER_MAGIC || hdr->magic == SUBQ_HEADER_MAGIC_SWAPPED) {
                 parse_headered_packet(hdr, data + sizeof(NetworkAudioHeader), size - sizeof(NetworkAudioHeader), size);
+                return;
+            } else if (hdr->magic == 0xDEADBEEF) {
+                malformed_packets_.fetch_add(1, std::memory_order_relaxed);
+                dropped_packets_.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+        } else if (size >= 4) {
+            uint32_t magic_check = *reinterpret_cast<const uint32_t*>(data);
+            if (magic_check == SUBQ_HEADER_MAGIC || magic_check == SUBQ_HEADER_MAGIC_SWAPPED || magic_check == 0xDEADBEEF) {
+                malformed_packets_.fetch_add(1, std::memory_order_relaxed);
+                dropped_packets_.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
         }
