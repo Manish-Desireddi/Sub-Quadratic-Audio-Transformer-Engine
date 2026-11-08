@@ -3,21 +3,18 @@ import numpy as np
 import time
 import os
 
-try:
-    import subq_engine
-except ImportError:
-    import sys
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    import build.Release.subq_engine as subq_engine
+from subq_audio import SubQEngine, get_device_info
+
 
 @pytest.fixture(scope="module")
 def engine():
-    return subq_engine.SubQEngine(256 * 1024 * 1024)
+    return SubQEngine(256 * 1024 * 1024)
+
 
 def test_computational_scaling(engine, real_audio):
     batch = 1
     d_model = 256
-    seq_lengths = [1024, 4096] # Test practical small sequences
+    seq_lengths = [1024, 4096]  # Test practical small sequences
     
     for seq_len in seq_lengths:
         Q, K, V = real_audio(batch, seq_len, d_model)
@@ -31,9 +28,10 @@ def test_computational_scaling(engine, real_audio):
         
         assert out.shape == (batch, seq_len, d_model), f"Expected shape {(batch, seq_len, d_model)}, got {out.shape}"
         
-        info = subq_engine.get_device_info()
+        info = get_device_info()
         if info['backend'] != "CPU":
             assert latency < 1000.0, f"Latency {latency:.2f} ms exceeds 1000ms threshold for O(1) engine on GPU"
+
 
 def test_mathematical_stability(engine, real_audio):
     batch = 1

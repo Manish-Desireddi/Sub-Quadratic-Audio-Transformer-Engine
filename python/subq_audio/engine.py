@@ -3,6 +3,7 @@ High-level engine lifecycle and polymorphic tensor execution wrapper for Sub-Qua
 """
 
 from typing import Any, Dict, Optional, Tuple, Union
+import math
 import os
 import numpy as np
 import numpy.typing as npt
@@ -62,7 +63,10 @@ class AudioTransformerEngine:
             orig_dtype = Q.dtype
             if orig_dtype in (torch.float16, torch.bfloat16):
                 from .autograd import chunkwise_flash_linear_attention
-                O, _ = chunkwise_flash_linear_attention(Q, K, V, decay_w=torch.tensor(float(decay_factor), dtype=orig_dtype, device=Q.device))
+                gamma = min(max(float(decay_factor), 1e-7), 1.0 - 1e-7)
+                logit_w = math.log(gamma / (1.0 - gamma))
+                decay_w_t = torch.tensor(logit_w, dtype=orig_dtype, device=Q.device)
+                O, _ = chunkwise_flash_linear_attention(Q, K, V, decay_w=decay_w_t)
                 return O.to(dtype=orig_dtype)
 
             if Q.is_cuda and hasattr(K, "is_cuda") and K.is_cuda and hasattr(V, "is_cuda") and V.is_cuda:
@@ -110,15 +114,19 @@ class AudioTransformerEngine:
                 q_req = Q.detach().clone().requires_grad_(True)
                 k_req = K.detach().clone().requires_grad_(True)
                 v_req = V.detach().clone().requires_grad_(True)
-                decay_t = torch.tensor(float(decay_factor), dtype=orig_dtype, device=Q.device, requires_grad=True)
+                gamma = min(max(float(decay_factor), 1e-7), 1.0 - 1e-7)
+                logit_w = math.log(gamma / (1.0 - gamma))
+                decay_t = torch.tensor(logit_w, dtype=orig_dtype, device=Q.device, requires_grad=True)
                 out = SubQAttentionFunction.apply(q_req, k_req, v_req, decay_t)
                 loss = (out * dO).sum()
                 loss.backward()
+                dw = float(decay_t.grad.item() if decay_t.grad is not None else 0.0)
+                d_gamma = dw / (gamma * (1.0 - gamma))
                 return (
                     q_req.grad.contiguous().to(dtype=orig_dtype),
                     k_req.grad.contiguous().to(dtype=orig_dtype),
                     v_req.grad.contiguous().to(dtype=orig_dtype),
-                    float(decay_t.grad.item() if decay_t.grad is not None else 0.0),
+                    float(d_gamma),
                 )
 
             if Q.is_cuda and hasattr(dO, "is_cuda") and dO.is_cuda:

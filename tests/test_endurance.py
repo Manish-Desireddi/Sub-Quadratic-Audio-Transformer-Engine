@@ -5,7 +5,7 @@ import psutil
 import threading
 import time
 
-import subq_engine
+from subq_audio import SubQEngine
 
 def get_memory_mb():
     process = psutil.Process(os.getpid())
@@ -17,7 +17,7 @@ def test_million_token_stream():
     through the engine and asserting O(1) memory boundaries and NaN decay bounds.
     """
     # 256MB boundary
-    engine = subq_engine.SubQEngine(256 * 1024 * 1024)
+    engine = SubQEngine(256 * 1024 * 1024)
     batch, d_model = 1, 256
     
     start_mem = get_memory_mb()
@@ -49,7 +49,7 @@ def test_hot_swapping_thrash(tmp_path):
     Multiple threads attempting to load a new .safetensors model while
     another thread is actively streaming audio must not segfault the arena.
     """
-    engine = subq_engine.SubQEngine(256 * 1024 * 1024)
+    engine = SubQEngine(256 * 1024 * 1024)
     batch, d_model = 1, 256
     
     dummy_file = tmp_path / "dummy.safetensors"

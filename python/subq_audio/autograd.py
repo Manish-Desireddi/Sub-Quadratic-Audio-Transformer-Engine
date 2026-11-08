@@ -240,6 +240,195 @@ def chunkwise_flash_linear_attention(
     return out.contiguous(), next_state
 
 
+def _single_direction_causal_backward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    decay_w: torch.Tensor,
+    grad_output: torch.Tensor,
+    chunk_size: int = 64,
+    valid_mask: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Computes exact analytical reverse adjoint gradients for single-direction causal Flash Linear Attention.
+    Inputs q, k, v, grad_output must be 4D tensors: [B, H, T, D].
+    Returns (dQ, dK, dV, dw).
+    """
+    orig_w = decay_w
+    B, H, T, D = q.shape
+    phi_q = feature_map(q)
+    phi_k = feature_map(k)
+
+    if decay_w.ndim == 0:
+        log_gamma = -F.softplus(-decay_w).view(1, 1, 1).expand(B, H, T)
+    elif decay_w.ndim == 1:
+        if decay_w.shape[0] == H:
+            log_gamma = -F.softplus(-decay_w).view(1, H, 1).expand(B, H, T)
+        else:
+            log_gamma = -F.softplus(-decay_w).view(1, 1, -1).expand(B, H, T)
+    elif decay_w.ndim == 2:
+        if decay_w.shape[1] == T:
+            log_gamma = -F.softplus(-decay_w).view(B, 1, T).expand(B, H, T)
+        else:
+            log_gamma = -F.softplus(-decay_w).view(B, H, 1).expand(B, H, T)
+    elif decay_w.ndim == 3:
+        if decay_w.shape == (B, H, T):
+            log_gamma = -F.softplus(-decay_w)
+        else:
+            log_gamma = -F.softplus(-decay_w).expand(B, H, T)
+    else:
+        log_gamma = -F.softplus(-decay_w).expand(B, H, T)
+
+    if valid_mask is not None:
+        vm = valid_mask.expand(B, H, T, 1)
+        phi_k = phi_k * vm
+        v = v * vm
+        vm_2d = valid_mask.squeeze(-1).expand(B, H, T)
+        log_gamma = torch.where(vm_2d > 0, log_gamma, torch.zeros_like(log_gamma))
+        grad_output = grad_output * vm
+
+    pad_len = (chunk_size - (T % chunk_size)) % chunk_size
+    if pad_len > 0:
+        q = F.pad(q, (0, 0, 0, pad_len))
+        k = F.pad(k, (0, 0, 0, pad_len))
+        phi_q = F.pad(phi_q, (0, 0, 0, pad_len))
+        phi_k = F.pad(phi_k, (0, 0, 0, pad_len))
+        v = F.pad(v, (0, 0, 0, pad_len))
+        grad_output = F.pad(grad_output, (0, 0, 0, pad_len))
+        log_gamma = F.pad(log_gamma, (0, pad_len), value=0.0)
+
+    T_padded = phi_q.shape[2]
+    num_chunks = T_padded // chunk_size
+
+    phi_q_c = phi_q.view(B, H, num_chunks, chunk_size, D)
+    phi_k_c = phi_k.view(B, H, num_chunks, chunk_size, D)
+    v_c = v.view(B, H, num_chunks, chunk_size, D)
+    dO_c = grad_output.view(B, H, num_chunks, chunk_size, D)
+    log_gamma_c = log_gamma.view(B, H, num_chunks, chunk_size)
+
+    z = torch.cumsum(log_gamma_c, dim=-1)
+    z_diff = z.unsqueeze(-1) - z.unsqueeze(-2)
+    causal_mask = torch.tril(torch.ones((chunk_size, chunk_size), device=q.device, dtype=torch.bool))
+    z_diff = z_diff.masked_fill(~causal_mask, float("-inf"))
+    M = torch.exp(z_diff).to(q.dtype)
+
+    qk_unmasked = torch.matmul(phi_q_c, phi_k_c.transpose(-1, -2))
+
+    z_end = z[:, :, :, -1:]
+    chunk_decay = torch.exp(z_end).unsqueeze(-1).to(q.dtype)
+    k_decay = torch.exp(z_end - z).unsqueeze(-1).to(q.dtype)
+    kv_chunks = torch.matmul((phi_k_c * k_decay).transpose(-1, -2), v_c)
+    q_decay = torch.exp(z).unsqueeze(-1).to(q.dtype)
+
+    # PASS 1: Chunk Boundary Checkpoints only (O(T / C) compact memory)
+    S_starts = []
+    S_curr = torch.zeros((B, H, D, D), dtype=q.dtype, device=q.device)
+    for c in range(num_chunks):
+        S_starts.append(S_curr)
+        S_curr = chunk_decay[:, :, c] * S_curr + kv_chunks[:, :, c]
+
+    dQ = torch.zeros_like(phi_q)
+    dK = torch.zeros_like(phi_k)
+    dV = torch.zeros_like(v)
+    dS_next = torch.zeros((B, H, D, D), dtype=q.dtype, device=q.device)
+    dlog_gamma = torch.zeros_like(log_gamma_c)
+
+    # PASS 2: Vectorized Chunkwise Reverse Adjoint Scan
+    for c in range(num_chunks - 1, -1, -1):
+        dO_chunk = dO_c[:, :, c]
+        v_chunk = v_c[:, :, c]
+        pq_chunk = phi_q_c[:, :, c]
+        pk_chunk = phi_k_c[:, :, c]
+        M_chunk = M[:, :, c]
+        qk_u = qk_unmasked[:, :, c]
+
+        # Intra-chunk batched GEMMs
+        A_chunk = qk_u * M_chunk
+        dV_intra = torch.matmul(A_chunk.transpose(-1, -2), dO_chunk)
+        dA_chunk = torch.matmul(dO_chunk, v_chunk.transpose(-1, -2))
+        dScore = dA_chunk * M_chunk
+        dpq_intra = torch.matmul(dScore, pk_chunk)
+        dpk_intra = torch.matmul(dScore.transpose(-1, -2), pq_chunk)
+
+        dM_score = dA_chunk * qk_u * M_chunk
+        dM_score = torch.where(causal_mask, dM_score, torch.zeros_like(dM_score))
+        dz_intra = dM_score.sum(dim=-1) - dM_score.sum(dim=-2)
+
+        # Inter-chunk state propagation
+        Sc = S_starts[c]
+        qd = q_decay[:, :, c]
+        kd = k_decay[:, :, c]
+        cd = chunk_decay[:, :, c]
+
+        dpq_inter = torch.matmul(dO_chunk, Sc.transpose(-1, -2)) * qd
+        out_inter_c_val = torch.matmul(pq_chunk, Sc)
+        dz_q = (dO_chunk * out_inter_c_val * qd).sum(dim=-1)
+
+        dKV = dS_next
+        dpk_inter = torch.matmul(v_chunk, dKV.transpose(-1, -2)) * kd
+        dV_inter = torch.matmul(pk_chunk * kd, dKV)
+
+        vk_term = (torch.matmul(v_chunk, dKV.transpose(-1, -2)) * pk_chunk).sum(dim=-1)
+        dz_k = -vk_term * kd.squeeze(-1)
+        dz_end_k = (vk_term * kd.squeeze(-1)).sum(dim=-1, keepdim=True)
+
+        dcd = (dS_next * Sc).sum(dim=(-1, -2), keepdim=True)
+        dz_end_cd = (dcd * cd).squeeze(-1)
+
+        dz_c = dz_intra + dz_q + dz_k
+        dz_c[:, :, -1:] += (dz_end_k + dz_end_cd)
+        dlog_gamma[:, :, c] = torch.flip(torch.cumsum(torch.flip(dz_c, dims=[-1]), dim=-1), dims=[-1])
+
+        dS_from_O = torch.matmul((pq_chunk * qd).transpose(-1, -2), dO_chunk)
+        dS_next = dS_from_O + cd * dS_next
+
+        dpq = dpq_intra + dpq_inter
+        dpk = dpk_intra + dpk_inter
+        dV[:, :, c * chunk_size : (c + 1) * chunk_size] = dV_intra + dV_inter
+
+        q_chunk = q.view(B, H, num_chunks, chunk_size, D)[:, :, c]
+        k_chunk = k.view(B, H, num_chunks, chunk_size, D)[:, :, c]
+        q_prime = feature_map_prime(q_chunk)
+        k_prime = feature_map_prime(k_chunk)
+
+        dQ[:, :, c * chunk_size : (c + 1) * chunk_size] = dpq * q_prime
+        dK[:, :, c * chunk_size : (c + 1) * chunk_size] = dpk * k_prime
+
+    if pad_len > 0:
+        dQ = dQ[:, :, :T, :]
+        dK = dK[:, :, :T, :]
+        dV = dV[:, :, :T, :]
+        dlog_gamma = dlog_gamma.view(B, H, T_padded)[:, :, :T]
+    else:
+        dlog_gamma = dlog_gamma.view(B, H, T)
+
+    if valid_mask is not None:
+        vm = valid_mask.expand(B, H, T, D)
+        dQ = dQ * vm
+        dK = dK * vm
+        dV = dV * vm
+
+    dlog_gamma_flat = dlog_gamma.view(B, H, T)
+    if orig_w.ndim == 0:
+        dw = (dlog_gamma_flat * torch.sigmoid(-orig_w)).sum()
+    elif orig_w.ndim == 1:
+        if orig_w.shape[0] == H:
+            dw = (dlog_gamma_flat * torch.sigmoid(-orig_w).view(1, H, 1)).sum(dim=(0, 2))
+        else:
+            dw = (dlog_gamma_flat * torch.sigmoid(-orig_w).view(1, 1, -1)).sum(dim=(0, 1))
+    elif orig_w.ndim == 2:
+        if orig_w.shape[1] == T:
+            dw = (dlog_gamma_flat * torch.sigmoid(-orig_w).view(B, 1, T)).sum(dim=1)
+        else:
+            dw = (dlog_gamma_flat * torch.sigmoid(-orig_w).view(B, H, 1)).sum(dim=-1)
+    elif orig_w.ndim == 3:
+        dw = dlog_gamma_flat * torch.sigmoid(-orig_w)
+    else:
+        dw = dlog_gamma_flat.sum()
+
+    return dQ, dK, dV, dw
+
+
 class SubQAttentionFunction(torch.autograd.Function):
     """
     Exact analytical autograd bridge for Sub-Quadratic Associative Linear Attention.
@@ -287,8 +476,8 @@ class SubQAttentionFunction(torch.autograd.Function):
         q, k, v, decay_w = ctx.saved_tensors
         chunk_size = getattr(ctx, "chunk_size", 64)
         is_3d = getattr(ctx, "is_3d", False)
+        is_causal = getattr(ctx, "is_causal", True)
         valid_mask = getattr(ctx, "valid_mask", None)
-        orig_w = decay_w
 
         if is_3d:
             q = q.unsqueeze(1)
@@ -296,176 +485,69 @@ class SubQAttentionFunction(torch.autograd.Function):
             v = v.unsqueeze(1)
             grad_output = grad_output.unsqueeze(1)
 
-        B, H, T, D = q.shape
-        phi_q = feature_map(q)
-        phi_k = feature_map(k)
-
-        if decay_w.ndim == 0:
-            log_gamma = -F.softplus(-decay_w).view(1, 1, 1).expand(B, H, T)
-        elif decay_w.ndim == 1:
-            if decay_w.shape[0] == H:
-                log_gamma = -F.softplus(-decay_w).view(1, H, 1).expand(B, H, T)
-            else:
-                log_gamma = -F.softplus(-decay_w).view(1, 1, -1).expand(B, H, T)
-        elif decay_w.ndim == 2:
-            if decay_w.shape[1] == T:
-                log_gamma = -F.softplus(-decay_w).view(B, 1, T).expand(B, H, T)
-            else:
-                log_gamma = -F.softplus(-decay_w).view(B, H, 1).expand(B, H, T)
-        elif decay_w.ndim == 3:
-            if decay_w.shape == (B, H, T):
-                log_gamma = -F.softplus(-decay_w)
-            else:
-                log_gamma = -F.softplus(-decay_w).expand(B, H, T)
+        if is_causal:
+            dQ, dK, dV, dw = _single_direction_causal_backward(
+                q, k, v, decay_w, grad_output, chunk_size=chunk_size, valid_mask=valid_mask
+            )
         else:
-            log_gamma = -F.softplus(-decay_w).expand(B, H, T)
+            # Full Multi-Directional Gradient Decomposition (is_causal=False)
+            # 1. Forward causal adjoint scan (past-to-present)
+            dQ_fwd, dK_fwd, dV_fwd, dw_fwd = _single_direction_causal_backward(
+                q, k, v, decay_w, grad_output, chunk_size=chunk_size, valid_mask=valid_mask
+            )
 
-        if valid_mask is not None:
-            vm = valid_mask.expand(B, H, T, 1)
-            phi_k = phi_k * vm
-            v = v * vm
-            vm_2d = valid_mask.squeeze(-1).expand(B, H, T)
-            log_gamma = torch.where(vm_2d > 0, log_gamma, torch.zeros_like(log_gamma))
-            grad_output = grad_output * vm
+            # 2. Reverse causal adjoint scan (future-to-past)
+            q_rev = torch.flip(q, dims=[2])
+            k_rev = torch.flip(k, dims=[2])
+            v_rev = torch.flip(v, dims=[2])
+            decay_w_rev = (
+                torch.flip(decay_w, dims=[-1])
+                if isinstance(decay_w, torch.Tensor) and decay_w.ndim >= 2
+                else decay_w
+            )
+            vm_rev = torch.flip(valid_mask, dims=[2]) if valid_mask is not None else None
+            dO_rev = torch.flip(grad_output, dims=[2])
 
-        pad_len = (chunk_size - (T % chunk_size)) % chunk_size
-        if pad_len > 0:
-            q = F.pad(q, (0, 0, 0, pad_len))
-            k = F.pad(k, (0, 0, 0, pad_len))
-            phi_q = F.pad(phi_q, (0, 0, 0, pad_len))
-            phi_k = F.pad(phi_k, (0, 0, 0, pad_len))
-            v = F.pad(v, (0, 0, 0, pad_len))
-            grad_output = F.pad(grad_output, (0, 0, 0, pad_len))
-            log_gamma = F.pad(log_gamma, (0, pad_len), value=0.0)
+            dQ_bwd_raw, dK_bwd_raw, dV_bwd_raw, dw_bwd_raw = _single_direction_causal_backward(
+                q_rev, k_rev, v_rev, decay_w_rev, dO_rev, chunk_size=chunk_size, valid_mask=vm_rev
+            )
+            dQ_bwd = torch.flip(dQ_bwd_raw, dims=[2])
+            dK_bwd = torch.flip(dK_bwd_raw, dims=[2])
+            dV_bwd = torch.flip(dV_bwd_raw, dims=[2])
+            dw_bwd = (
+                torch.flip(dw_bwd_raw, dims=[-1])
+                if isinstance(decay_w, torch.Tensor) and decay_w.ndim >= 2
+                else dw_bwd_raw
+            )
 
-        T_padded = phi_q.shape[2]
-        num_chunks = T_padded // chunk_size
-
-        phi_q_c = phi_q.view(B, H, num_chunks, chunk_size, D)
-        phi_k_c = phi_k.view(B, H, num_chunks, chunk_size, D)
-        v_c = v.view(B, H, num_chunks, chunk_size, D)
-        dO_c = grad_output.view(B, H, num_chunks, chunk_size, D)
-        log_gamma_c = log_gamma.view(B, H, num_chunks, chunk_size)
-
-        z = torch.cumsum(log_gamma_c, dim=-1)
-        z_diff = z.unsqueeze(-1) - z.unsqueeze(-2)
-        causal_mask = torch.tril(torch.ones((chunk_size, chunk_size), device=q.device, dtype=torch.bool))
-        z_diff = z_diff.masked_fill(~causal_mask, float("-inf"))
-        M = torch.exp(z_diff).to(q.dtype)
-
-        qk_unmasked = torch.matmul(phi_q_c, phi_k_c.transpose(-1, -2))
-
-        z_end = z[:, :, :, -1:]
-        chunk_decay = torch.exp(z_end).unsqueeze(-1).to(q.dtype)
-        k_decay = torch.exp(z_end - z).unsqueeze(-1).to(q.dtype)
-        kv_chunks = torch.matmul((phi_k_c * k_decay).transpose(-1, -2), v_c)
-        q_decay = torch.exp(z).unsqueeze(-1).to(q.dtype)
-
-        # PASS 1: Chunk Boundary Checkpoints only (O(T / C) compact memory)
-        S_starts = []
-        S_curr = torch.zeros((B, H, D, D), dtype=q.dtype, device=q.device)
-        for c in range(num_chunks):
-            S_starts.append(S_curr)
-            S_curr = chunk_decay[:, :, c] * S_curr + kv_chunks[:, :, c]
-
-        dQ = torch.zeros_like(phi_q)
-        dK = torch.zeros_like(phi_k)
-        dV = torch.zeros_like(v)
-        dS_next = torch.zeros((B, H, D, D), dtype=q.dtype, device=q.device)
-        dlog_gamma = torch.zeros_like(log_gamma_c)
-
-        # PASS 2: Vectorized Chunkwise Reverse Adjoint Scan
-        for c in range(num_chunks - 1, -1, -1):
-            dO_chunk = dO_c[:, :, c]
-            v_chunk = v_c[:, :, c]
-            pq_chunk = phi_q_c[:, :, c]
-            pk_chunk = phi_k_c[:, :, c]
-            M_chunk = M[:, :, c]
-            qk_u = qk_unmasked[:, :, c]
-
-            # Intra-chunk batched GEMMs
-            A_chunk = qk_u * M_chunk
-            dV_intra = torch.matmul(A_chunk.transpose(-1, -2), dO_chunk)
-            dA_chunk = torch.matmul(dO_chunk, v_chunk.transpose(-1, -2))
-            dScore = dA_chunk * M_chunk
-            dpq_intra = torch.matmul(dScore, pk_chunk)
-            dpk_intra = torch.matmul(dScore.transpose(-1, -2), pq_chunk)
-
-            dM_score = dA_chunk * qk_u * M_chunk
-            dM_score = torch.where(causal_mask, dM_score, torch.zeros_like(dM_score))
-            dz_intra = dM_score.sum(dim=-1) - dM_score.sum(dim=-2)
-
-            # Inter-chunk state propagation
-            Sc = S_starts[c]
-            qd = q_decay[:, :, c]
-            kd = k_decay[:, :, c]
-            cd = chunk_decay[:, :, c]
-
-            dpq_inter = torch.matmul(dO_chunk, Sc.transpose(-1, -2)) * qd
-            out_inter_c_val = torch.matmul(pq_chunk, Sc)
-            dz_q = (dO_chunk * out_inter_c_val * qd).sum(dim=-1)
-
-            dKV = dS_next
-            dpk_inter = torch.matmul(v_chunk, dKV.transpose(-1, -2)) * kd
-            dV_inter = torch.matmul(pk_chunk * kd, dKV)
-
-            vk_term = (torch.matmul(v_chunk, dKV.transpose(-1, -2)) * pk_chunk).sum(dim=-1)
-            dz_k = -vk_term * kd.squeeze(-1)
-            dz_end_k = (vk_term * kd.squeeze(-1)).sum(dim=-1, keepdim=True)
-
-            dcd = (dS_next * Sc).sum(dim=(-1, -2), keepdim=True)
-            dz_end_cd = (dcd * cd).squeeze(-1)
-
-            dz_c = dz_intra + dz_q + dz_k
-            dz_c[:, :, -1:] += (dz_end_k + dz_end_cd)
-            dlog_gamma[:, :, c] = torch.flip(torch.cumsum(torch.flip(dz_c, dims=[-1]), dim=-1), dims=[-1])
-
-            dS_from_O = torch.matmul((pq_chunk * qd).transpose(-1, -2), dO_chunk)
-            dS_next = dS_from_O + cd * dS_next
-
-            dpq = dpq_intra + dpq_inter
-            dpk = dpk_intra + dpk_inter
-            dV[:, :, c * chunk_size : (c + 1) * chunk_size] = dV_intra + dV_inter
-
-            q_chunk = q.view(B, H, num_chunks, chunk_size, D)[:, :, c]
-            k_chunk = k.view(B, H, num_chunks, chunk_size, D)[:, :, c]
-            q_prime = feature_map_prime(q_chunk)
-            k_prime = feature_map_prime(k_chunk)
-
-            dQ[:, :, c * chunk_size : (c + 1) * chunk_size] = dpq * q_prime
-            dK[:, :, c * chunk_size : (c + 1) * chunk_size] = dpk * k_prime
-
-        if pad_len > 0:
-            dQ = dQ[:, :, :T, :]
-            dK = dK[:, :, :T, :]
-            dV = dV[:, :, :T, :]
-            dlog_gamma = dlog_gamma.view(B, H, T_padded)[:, :, :T]
-        else:
-            dlog_gamma = dlog_gamma.view(B, H, T)
-
-        if valid_mask is not None:
-            vm = valid_mask.expand(B, H, T, D)
-            dQ = dQ * vm
-            dK = dK * vm
-            dV = dV * vm
-
-        dlog_gamma_flat = dlog_gamma.view(B, H, T)
-        if orig_w.ndim == 0:
-            dw = (dlog_gamma_flat * torch.sigmoid(-orig_w)).sum()
-        elif orig_w.ndim == 1:
-            if orig_w.shape[0] == H:
-                dw = (dlog_gamma_flat * torch.sigmoid(-orig_w).view(1, H, 1)).sum(dim=(0, 2))
+            # 3. Exact diagonal intra-token self-interaction adjoint
+            phi_q = feature_map(q)
+            phi_k = feature_map(k)
+            if valid_mask is not None:
+                vm_exp = valid_mask.expand_as(phi_k)
+                phi_k = phi_k * vm_exp
+                v_masked = v * vm_exp
+                dO_masked = grad_output * vm_exp
             else:
-                dw = (dlog_gamma_flat * torch.sigmoid(-orig_w).view(1, 1, -1)).sum(dim=(0, 1))
-        elif orig_w.ndim == 2:
-            if orig_w.shape[1] == T:
-                dw = (dlog_gamma_flat * torch.sigmoid(-orig_w).view(B, 1, T)).sum(dim=1)
-            else:
-                dw = (dlog_gamma_flat * torch.sigmoid(-orig_w).view(B, H, 1)).sum(dim=-1)
-        elif orig_w.ndim == 3:
-            dw = dlog_gamma_flat * torch.sigmoid(-orig_w)
-        else:
-            dw = dlog_gamma_flat.sum()
+                vm_exp = None
+                v_masked = v
+                dO_masked = grad_output
+
+            dO_dot_v = torch.sum(dO_masked * v_masked, dim=-1, keepdim=True)
+            q_dot_k = torch.sum(phi_q * phi_k, dim=-1, keepdim=True)
+
+            dQ_diag = (dO_dot_v * phi_k) * feature_map_prime(q)
+            dK_diag = (dO_dot_v * phi_q) * feature_map_prime(k)
+            dV_diag = q_dot_k * dO_masked
+
+            if vm_exp is not None:
+                dQ_diag = dQ_diag * vm_exp
+                dK_diag = dK_diag * vm_exp
+
+            dQ = dQ_fwd + dQ_bwd - dQ_diag
+            dK = dK_fwd + dK_bwd - dK_diag
+            dV = dV_fwd + dV_bwd - dV_diag
+            dw = dw_fwd + dw_bwd
 
         if is_3d:
             dQ = dQ.squeeze(1)

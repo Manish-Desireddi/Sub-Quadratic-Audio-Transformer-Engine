@@ -14,7 +14,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.append(os.path.join(parent_dir, "python"))
 
-import subq_engine
+from subq_audio import SubQEngine
 from .reference import linear_attention_forward
 
 def test_forward_equivalence(real_audio):
@@ -39,7 +39,7 @@ def test_forward_equivalence(real_audio):
     O_ref = linear_attention_forward(Q_torch.clone(), K_torch.clone(), V_torch.clone())
 
     # C++ execution
-    engine = subq_engine.SubQEngine(128 * 1024 * 1024)
+    engine = SubQEngine(128 * 1024 * 1024)
     # Clone so C++ doesn't mutate our test arrays
     O_cpp = engine.forward(Q_np.copy(), K_np.copy(), V_np.copy(), decay_factor=1.0)
     O_cpp_tensor = torch.from_numpy(O_cpp)

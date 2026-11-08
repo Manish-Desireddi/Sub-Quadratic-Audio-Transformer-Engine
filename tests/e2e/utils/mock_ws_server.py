@@ -1,7 +1,7 @@
 """
 Mock Asynchronous WebSocket Streaming Server for Live Audio Ingestion Testing.
 
-Encodes and streams chunked binary audio frames prepended with the 32-byte
+Encodes and streams chunked binary audio frames prepended with the 36-byte
 Sub-Quadratic binary header (NetworkAudioHeader, magic=0x53554251). Supports dynamic
 port binding, realtime pacing, raw text/corrupt frame injection, and connection metrics.
 """
@@ -24,8 +24,8 @@ except ImportError:
 
 # Binary Protocol Constants
 SUBQ_MAGIC_BYTES = 0x53554251  # Little-endian ASCII "SUBQ"
-HEADER_STRUCT_FORMAT = "<IIIQIHHI"
-HEADER_BYTE_SIZE = 32
+HEADER_STRUCT_FORMAT = "<IIQQIHHI"
+HEADER_BYTE_SIZE = 36
 
 FORMAT_FLOAT32 = 0
 FORMAT_INT16 = 1
@@ -41,20 +41,20 @@ def pack_network_audio_header(
     payload_bytes: int = 0,
     magic: int = SUBQ_MAGIC_BYTES
 ) -> bytes:
-    """Packs fields into a 32-byte binary NetworkAudioHeader.
+    """Packs fields into a 36-byte binary NetworkAudioHeader.
     
     Args:
         stream_id: Identifier for audio stream.
-        seq_no: Monotonically increasing sequence number.
-        timestamp_us: Microsecond timestamp.
-        sample_rate: Audio sampling frequency in Hz.
-        channels: Channel count (1=mono, 2=stereo).
-        audio_format: 0 for Float32, 1 for Int16 PCM.
-        payload_bytes: Byte count of subsequent PCM audio payload.
-        magic: Protocol magic identifier (default 0x53554251).
+        seq_no: Monotonically increasing sequence number (uint64).
+        timestamp_us: Microsecond timestamp (uint64).
+        sample_rate: Audio sampling frequency in Hz (uint32).
+        channels: Channel count (1=mono, 2=stereo) (uint16).
+        audio_format: 0 for Float32, 1 for Int16 PCM (uint16).
+        payload_bytes: Byte count of subsequent PCM audio payload (uint32).
+        magic: Protocol magic identifier (default 0x53554251) (uint32).
         
     Returns:
-        32-byte packed binary header.
+        36-byte packed binary header.
     """
     return struct.pack(
         HEADER_STRUCT_FORMAT,
@@ -70,10 +70,10 @@ def pack_network_audio_header(
 
 
 def unpack_network_audio_header(data: bytes) -> dict:
-    """Unpacks a 32-byte binary NetworkAudioHeader into a dictionary.
+    """Unpacks a 36-byte binary NetworkAudioHeader into a dictionary.
     
     Args:
-        data: At least 32 bytes of raw binary header.
+        data: At least 36 bytes of raw binary header.
         
     Returns:
         Dictionary containing unpacked header fields.

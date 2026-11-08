@@ -433,3 +433,70 @@ def test_gradcheck_dynamic_decay():
     )
     assert passed, "Dynamic decay gradcheck failed"
 
+
+
+def test_gradcheck_bidirectional_nominal():
+    """Verify analytical backward pass on bidirectional attention (is_causal=False)."""
+    torch.manual_seed(42)
+    B, T, D = 2, 8, 4
+    dtype = torch.float64
+
+    q = torch.randn(B, T, D, dtype=dtype, requires_grad=True)
+    k = torch.randn(B, T, D, dtype=dtype, requires_grad=True)
+    v = torch.randn(B, T, D, dtype=dtype, requires_grad=True)
+    w = torch.tensor(1.2, dtype=dtype, requires_grad=True)
+
+    passed = gradcheck(
+        SubQAttentionFunction.apply,
+        (q, k, v, w, 4, None, False),
+        eps=1e-6,
+        atol=1e-4,
+        rtol=1e-3,
+        raise_exception=True,
+    )
+    assert passed, "Bidirectional nominal gradcheck failed"
+
+
+def test_gradcheck_bidirectional_multihead_4d():
+    """Verify analytical backward pass on 4D multi-head bidirectional attention."""
+    torch.manual_seed(43)
+    B, H, T, D = 2, 2, 8, 4
+    dtype = torch.float64
+
+    q = torch.randn(B, H, T, D, dtype=dtype, requires_grad=True)
+    k = torch.randn(B, H, T, D, dtype=dtype, requires_grad=True)
+    v = torch.randn(B, H, T, D, dtype=dtype, requires_grad=True)
+    w = torch.randn(H, dtype=dtype, requires_grad=True)
+
+    passed = gradcheck(
+        SubQAttentionFunction.apply,
+        (q, k, v, w, 4, None, False),
+        eps=1e-6,
+        atol=1e-4,
+        rtol=1e-3,
+        raise_exception=True,
+    )
+    assert passed, "Bidirectional 4D multi-head gradcheck failed"
+
+
+def test_gradcheck_bidirectional_with_mask():
+    """Verify analytical backward pass on masked bidirectional attention."""
+    torch.manual_seed(44)
+    B, H, T, D = 2, 2, 8, 4
+    dtype = torch.float64
+
+    q = torch.randn(B, H, T, D, dtype=dtype, requires_grad=True)
+    k = torch.randn(B, H, T, D, dtype=dtype, requires_grad=True)
+    v = torch.randn(B, H, T, D, dtype=dtype, requires_grad=True)
+    w = torch.randn(H, dtype=dtype, requires_grad=True)
+    mask = torch.tensor([[1, 1, 1, 1, 1, 1, 0, 0], [1, 1, 1, 1, 1, 1, 1, 0]], dtype=torch.bool)
+
+    passed = gradcheck(
+        SubQAttentionFunction.apply,
+        (q, k, v, w, 4, mask, False),
+        eps=1e-6,
+        atol=1e-4,
+        rtol=1e-3,
+        raise_exception=True,
+    )
+    assert passed, "Bidirectional masked gradcheck failed"

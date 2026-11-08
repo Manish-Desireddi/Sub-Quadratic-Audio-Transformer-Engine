@@ -5,7 +5,7 @@ import struct
 import json
 import torch
 
-import subq_engine
+from subq_audio import SubQEngine
 
 def test_safetensors_overflow(tmp_path):
     """
@@ -33,7 +33,7 @@ def test_safetensors_overflow(tmp_path):
         f.write(header_json)
         # We don't even need to write the actual payload; the parser should throw instantly.
     
-    engine = subq_engine.SubQEngine(10 * 1024 * 1024)
+    engine = SubQEngine(10 * 1024 * 1024)
     with pytest.raises(RuntimeError) as exc_info:
         engine.load(str(bad_file))
     
@@ -46,7 +46,7 @@ def test_garbage_shapes():
     Test that PyBind11 correctly prevents non-3D arrays, 0-shapes, or mismatched bounds 
     from bleeding into the C++ `forward()` kernel.
     """
-    engine = subq_engine.SubQEngine(10 * 1024 * 1024)
+    engine = SubQEngine(10 * 1024 * 1024)
     
     # 1. 0-dimensional scalars
     Q = np.array(0.0, dtype=np.float32)
@@ -78,7 +78,7 @@ def test_nan_inf_ingestion():
     Inject NaN and Inf into the Q, K, V tensors to ensure the sub-quadratic 
     kernel doesn't crash the host or cascade infinitely beyond the output.
     """
-    engine = subq_engine.SubQEngine(10 * 1024 * 1024)
+    engine = SubQEngine(10 * 1024 * 1024)
     batch, seq_len, d_model = 1, 128, 64
     
     Q = np.full((batch, seq_len, d_model), np.nan, dtype=np.float32)

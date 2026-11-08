@@ -157,7 +157,7 @@ class TestTier1Feature02NetworkIngestion:
     """TEST-T1-F02-01 to TEST-T1-F02-05: C++ Network Ingestion Layer & WebSocket Protocol."""
 
     def test_t1_f02_01_subq_binary_header_parsing(self):
-        """TEST-T1-F02-01: Verify SUBQ binary 32-byte header packing and unpacking."""
+        """TEST-T1-F02-01: Verify SUBQ binary 36-byte header packing and unpacking."""
         header_bytes = pack_network_audio_header(
             stream_id=42,
             seq_no=100,
@@ -168,7 +168,7 @@ class TestTier1Feature02NetworkIngestion:
             payload_bytes=8192,
             magic=SUBQ_MAGIC_BYTES,
         )
-        assert len(header_bytes) == 32, f"Header size must be 32 bytes, got {len(header_bytes)}"
+        assert len(header_bytes) == 36, f"Header size must be 36 bytes, got {len(header_bytes)}"
 
         unpacked = unpack_network_audio_header(header_bytes)
         assert unpacked["is_valid_magic"] is True

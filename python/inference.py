@@ -5,20 +5,19 @@
 # For a copy, see <https://opensource.org/licenses/MIT>.
 # 
 
-import sys
 import os
+import sys
 import torch
 
-# Add the current directory to sys.path so we can import the generated .pyd
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 
 try:
-    import subq_engine
+    from subq_audio import AudioTransformerEngine
 except ImportError as e:
-    print(f"Failed to import subq_engine: {e}")
+    print(f"Failed to import subq_audio: {e}")
     print(
-        "Ensure you have built the CMake project and the .pyd file is in the python/ directory."
+        "Ensure you have built the CMake project and the subq_audio package is installed or in PYTHONPATH."
     )
     sys.exit(1)
 
@@ -29,20 +28,20 @@ class AudioFrontend(torch.nn.Module):
     Projects raw audio waveforms into the continuous d_model feature space (Q, K, V)
     using 1D Convolutions with a stride representing downsampling.
     """
-    def __init__(self, d_model):
+    def __init__(self, d_model: int):
         super().__init__()
-        # A standard strided 1D convolution to encode raw PCM into d_model dimensional vectors
+        # Strided 1D convolution to encode raw PCM into d_model dimensional vectors
         self.conv = torch.nn.Conv1d(in_channels=1, out_channels=d_model, kernel_size=16, stride=4, padding=6)
         # Linear projections for Q, K, V
         self.q_proj = torch.nn.Linear(d_model, d_model)
         self.k_proj = torch.nn.Linear(d_model, d_model)
         self.v_proj = torch.nn.Linear(d_model, d_model)
         
-    def forward(self, x):
+    def forward(self, x: torch.Tensor):
         # x: (batch, seq_len) raw audio samples
-        x = x.unsqueeze(1) # (batch, 1, seq_len)
-        features = self.conv(x) # (batch, d_model, downsampled_seq_len)
-        features = features.transpose(1, 2) # (batch, seq_len, d_model)
+        x = x.unsqueeze(1)  # (batch, 1, seq_len)
+        features = self.conv(x)  # (batch, d_model, downsampled_seq_len)
+        features = features.transpose(1, 2)  # (batch, seq_len, d_model)
         
         Q = self.q_proj(features)
         K = self.k_proj(features)
@@ -53,36 +52,33 @@ class AudioFrontend(torch.nn.Module):
 def main():
     print("Initializing Sub-Quadratic Engine (End-to-End Test)...")
     # Initialize with 256MB VRAM Arena
-    engine = subq_engine.SubQEngine(256 * 1024 * 1024)
+    engine = AudioTransformerEngine(vram_capacity=256 * 1024 * 1024)
 
     batch = 2
     seq_len = 1024
     d_model = 256
 
     print(
-        f"Initializing AudioFrontend (Conv1D) to process raw audio..."
+        "Initializing AudioFrontend (Conv1D) to process raw audio..."
     )
     frontend = AudioFrontend(d_model)
     
     # Generate realistic 1D continuous audio waveform (batch, raw_audio_samples)
-    raw_audio_len = seq_len * 4 # Because stride=4
+    raw_audio_len = seq_len * 4  # Because stride=4
     raw_audio = torch.randn(batch, raw_audio_len, dtype=torch.float32)
     
     with torch.no_grad():
         Q, K, V = frontend(raw_audio)
 
-    print("Running GPU forward pass via PyBind11 and CUDA MemoryArena...")
+    print("Running forward pass via AudioTransformerEngine zero-copy dispatcher...")
 
-    # We must pass the memory contiguous numpy arrays to our C++ backend
-    O_np = engine.forward(Q.numpy(), K.numpy(), V.numpy())
-
-    # Convert the resulting C++ NumPy pointer back into a native PyTorch tensor
-    O = torch.from_numpy(O_np)
+    # Pass native PyTorch tensors directly to AudioTransformerEngine
+    O = engine.forward(Q, K, V)
 
     print(f"Forward pass complete! Output tensor shape: {O.shape}")
     print("Status: End-to-End architecture verified!")
 
-    # Calculate some basic evaluation metrics
+    # Calculate basic evaluation metrics
     print("\nEvaluation Metrics:")
     print(f"- Mean activation: {O.mean().item():.6f}")
     print(f"- Std deviation: {O.std().item():.6f}")
