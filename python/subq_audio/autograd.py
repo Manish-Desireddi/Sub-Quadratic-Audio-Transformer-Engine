@@ -63,8 +63,16 @@ def _normalize_attention_mask(
             if valid_mask.shape[1] == target_len:
                 valid_mask = valid_mask.unsqueeze(1)
     elif valid_mask.ndim == 4:  # [B, 1, L, S] or [B, H, L, S]
-        # Sum across key source positions to obtain active query tokens
-        valid_mask = (valid_mask.sum(dim=-1, keepdim=True) > 0).to(dtype=target_dtype)
+        if valid_mask.shape[-2] != valid_mask.shape[-1]:
+            raise ValueError(
+                f"4D attention_mask must be square [B, 1|H, T, T]; got {tuple(valid_mask.shape)}"
+            )
+        # A token is active only if it is a live query (row has any visible key)
+        # AND a live key (column is visible to some query). The column test is what
+        # catches key-padding masks of shape [B, 1, T, T].
+        active_query = valid_mask.sum(dim=-1) > 0  # [B, H', T]
+        active_key = valid_mask.sum(dim=-2) > 0    # [B, H', T]
+        valid_mask = (active_query & active_key).to(dtype=target_dtype).unsqueeze(-1)
         if valid_mask.shape[1] > 1:
             valid_mask = valid_mask[:, :1, :, :]
 
