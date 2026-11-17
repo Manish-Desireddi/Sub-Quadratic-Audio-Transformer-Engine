@@ -11,6 +11,7 @@
 #include "engine.hpp"
 #include "arena.hpp"
 #include "attention.hpp"
+#include "kernels.hpp"
 #include "gpu_macros.hpp"
 #include "safetensors.hpp"
 #include <mutex>
@@ -326,7 +327,7 @@ public:
                             for (size_t j = 0; j < d_model; ++j) {
                                 float v_val = V_ptr[t_offset + j];
                                 float new_s = decay_factor * S_curr[i * d_model + j] + phi_k * v_val;
-                                if (std::abs(new_s) < 1e-15f) new_s = 0.0f;
+                                if (subq::is_subnormal_or_zero(new_s)) new_s = 0.0f;
                                 S_curr[i * d_model + j] = new_s;
                             }
                         }
@@ -357,7 +358,7 @@ public:
                             for (size_t j = 0; j < d_model; ++j) {
                                 float v_val = V_ptr[t_offset + j];
                                 float new_s = decay_factor * S_curr[i * d_model + j] + phi_k * v_val;
-                                if (std::abs(new_s) < 1e-15f) new_s = 0.0f;
+                                if (subq::is_subnormal_or_zero(new_s)) new_s = 0.0f;
                                 S_curr[i * d_model + j] = new_s;
                                 S_chunk[chunk_s_offset + i * d_model + j] = new_s;
                             }
@@ -510,7 +511,7 @@ public:
                             for (size_t j = 0; j < d_model; ++j) {
                                 float v_val = V[t_offset + j];
                                 float new_s = decay_factor * S_curr[i * d_model + j] + phi_k * v_val;
-                                if (std::abs(new_s) < 1e-15f) new_s = 0.0f;
+                                if (subq::is_subnormal_or_zero(new_s)) new_s = 0.0f;
                                 S_curr[i * d_model + j] = new_s;
                             }
                         }
@@ -540,7 +541,7 @@ public:
                             for (size_t j = 0; j < d_model; ++j) {
                                 float v_val = V[t_offset + j];
                                 float new_s = decay_factor * S_curr[i * d_model + j] + phi_k * v_val;
-                                if (std::abs(new_s) < 1e-15f) new_s = 0.0f;
+                                if (subq::is_subnormal_or_zero(new_s)) new_s = 0.0f;
                                 S_curr[i * d_model + j] = new_s;
                                 S_chunk[chunk_s_offset + i * d_model + j] = new_s;
                             }

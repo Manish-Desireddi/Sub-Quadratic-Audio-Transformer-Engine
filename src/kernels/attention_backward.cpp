@@ -13,6 +13,7 @@
 #include <cstring>
 #include <algorithm>
 #include <cassert>
+#include <stdexcept>
 
 namespace subq {
 
@@ -85,7 +86,11 @@ void subquadratic_attention_backward(AttentionBackwardContext<T>& ctx) {
             // =================================================================
             // PASS 1: Forward State Recurrence at chunk boundaries only
             // =================================================================
-            std::fill(S_curr.begin(), S_curr.end(), static_cast<T>(0));
+            if (ctx.S0 != nullptr) {
+                std::memcpy(S_curr.data(), &ctx.S0[(b * H + h) * D * D], D * D * sizeof(T));
+            } else {
+                std::fill(S_curr.begin(), S_curr.end(), static_cast<T>(0));
+            }
             std::fill(S_boundaries.begin(), S_boundaries.end(), static_cast<T>(0));
 
             for (size_t c = 0; c < num_chunks; ++c) {
@@ -107,7 +112,7 @@ void subquadratic_attention_backward(AttentionBackwardContext<T>& ctx) {
                             const T prev_s = S_curr[i * D + j];
                             const T v_j = ctx.V[qkv_offset + j];
                             T new_s = gamma * prev_s + k_i * v_j;
-                            if (new_s > -static_cast<T>(1e-15) && new_s < static_cast<T>(1e-15)) {
+                            if (subq::is_subnormal_or_zero(new_s)) {
                                 new_s = static_cast<T>(0);
                             }
                             S_curr[i * D + j] = new_s;
@@ -146,7 +151,7 @@ void subquadratic_attention_backward(AttentionBackwardContext<T>& ctx) {
                             const T prev_s = S_curr[i * D + j];
                             const T v_j = ctx.V[qkv_offset + j];
                             T new_s = gamma * prev_s + k_i * v_j;
-                            if (new_s > -static_cast<T>(1e-15) && new_s < static_cast<T>(1e-15)) {
+                            if (subq::is_subnormal_or_zero(new_s)) {
                                 new_s = static_cast<T>(0);
                             }
                             S_curr[i * D + j] = new_s;
@@ -212,12 +217,11 @@ void subquadratic_attention_backward(AttentionBackwardContext<T>& ctx) {
                         ctx.dK[qkv_offset + i] = sum_v_gamma * k_prime_vec[i];
                     }
 
-                    // 6. Accumulate d_gamma += <Gamma_t, S_{t-1}>_F (for t > 0)
-                    if (t > 0) {
-                        for (size_t i = 0; i < D; ++i) {
-                            for (size_t j = 0; j < D; ++j) {
-                                total_d_gamma += Gamma[i * D + j] * S_prev[i * D + j];
-                            }
+                    // 6. Accumulate d_gamma += <Gamma_t, S_{t-1}>_F. At t = 0 S_{-1} is the initial
+                    // state (zero when S0 is null, so this term vanishes in the default case).
+                    for (size_t i = 0; i < D; ++i) {
+                        for (size_t j = 0; j < D; ++j) {
+                            total_d_gamma += Gamma[i * D + j] * S_prev[i * D + j];
                         }
                     }
                 }
@@ -332,33 +336,57 @@ void run_attention_backward(AttentionContext& ctx) {
     CHECK_GPU_ERROR(gpuFree(dK));
     CHECK_GPU_ERROR(gpuFree(dV));
 #else
-    float* Q = static_cast<float*>(ctx.Q.data);
-    float* K = static_cast<float*>(ctx.K.data);
-    float* V = static_cast<float*>(ctx.V.data);
-    float* dO = static_cast<float*>(ctx.O.data);
-    
-    // In legacy callers where ctx.Q holds gradients in-place, we allocate temp buffers if needed
-    // or execute non-aliased backward
-    std::vector<float> dQ(batch * seq_len * d_model, 0.0f);
-    std::vector<float> dK(batch * seq_len * d_model, 0.0f);
-    std::vector<float> dV(batch * seq_len * d_model, 0.0f);
+    // Deprecated in-place contract: dO is read from ctx.O and the gradients overwrite Q/K/V.
+    // New code should call run_attention_backward_ex, which keeps inputs intact.
+    // The initial recurrence state is assumed to be zero (matches the Python bindings).
+    const size_t total = batch * seq_len * d_model;
+    std::vector<float> dQ(total, 0.0f);
+    std::vector<float> dK(total, 0.0f);
+    std::vector<float> dV(total, 0.0f);
 
-    float d_gamma = 0.0f;
+    run_attention_backward_ex(ctx, dQ.data(), dK.data(), dV.data(), nullptr, nullptr);
+
+    std::memcpy(ctx.Q.data, dQ.data(), total * sizeof(float));
+    std::memcpy(ctx.K.data, dK.data(), total * sizeof(float));
+    std::memcpy(ctx.V.data, dV.data(), total * sizeof(float));
+#endif
+}
+
+void run_attention_backward_ex(const AttentionContext& ctx, float* dQ, float* dK, float* dV,
+                               float* d_gamma, const float* S0) {
+#if defined(USE_CUDA) || defined(USE_HIP)
+    (void)ctx; (void)dQ; (void)dK; (void)dV; (void)d_gamma; (void)S0;
+    throw std::runtime_error("run_attention_backward_ex: GPU backward is not implemented");
+#else
+    const size_t batch = ctx.Q.dimensions[0];
+    const size_t seq_len = ctx.Q.dimensions[1];
+    const size_t d_model = ctx.Q.dimensions[2];
+
+    // Aliasing is a hard error in all build types (previously assert-only, compiled out in Release).
+    const void* inputs[] = {ctx.Q.data, ctx.K.data, ctx.V.data, ctx.O.data};
+    for (const void* in : inputs) {
+        if (in == dQ || in == dK || in == dV) {
+            throw std::invalid_argument("run_attention_backward_ex: gradient outputs must not alias inputs");
+        }
+    }
+
+    float d_gamma_local = 0.0f;
     float d_w = 0.0f;
-    float w_val = std::log(std::max(ctx.decay_factor, 1e-6f) / std::max(1.0f - ctx.decay_factor, 1e-6f));
+    const float w_val = std::log(std::max(ctx.decay_factor, 1e-6f) / std::max(1.0f - ctx.decay_factor, 1e-6f));
 
     subq::AttentionBackwardContext<float> bwd_ctx;
-    bwd_ctx.Q = Q;
-    bwd_ctx.K = K;
-    bwd_ctx.V = V;
-    bwd_ctx.dO = dO;
+    bwd_ctx.Q = static_cast<const float*>(ctx.Q.data);
+    bwd_ctx.K = static_cast<const float*>(ctx.K.data);
+    bwd_ctx.V = static_cast<const float*>(ctx.V.data);
+    bwd_ctx.dO = static_cast<const float*>(ctx.O.data);  // incoming gradient travels in ctx.O
     bwd_ctx.S = nullptr;
-    bwd_ctx.dQ = dQ.data();
-    bwd_ctx.dK = dK.data();
-    bwd_ctx.dV = dV.data();
+    bwd_ctx.S0 = S0;
+    bwd_ctx.dQ = dQ;
+    bwd_ctx.dK = dK;
+    bwd_ctx.dV = dV;
     bwd_ctx.raw_decay_w = w_val;
     bwd_ctx.d_raw_decay_w = &d_w;
-    bwd_ctx.d_gamma = &d_gamma;
+    bwd_ctx.d_gamma = &d_gamma_local;
     bwd_ctx.batch_size = batch;
     bwd_ctx.num_heads = 1;
     bwd_ctx.seq_len = seq_len;
@@ -366,8 +394,8 @@ void run_attention_backward(AttentionContext& ctx) {
 
     subq::subquadratic_attention_backward(bwd_ctx);
 
-    std::memcpy(ctx.Q.data, dQ.data(), batch * seq_len * d_model * sizeof(float));
-    std::memcpy(ctx.K.data, dK.data(), batch * seq_len * d_model * sizeof(float));
-    std::memcpy(ctx.V.data, dV.data(), batch * seq_len * d_model * sizeof(float));
+    if (d_gamma) {
+        *d_gamma = d_gamma_local;
+    }
 #endif
 }
