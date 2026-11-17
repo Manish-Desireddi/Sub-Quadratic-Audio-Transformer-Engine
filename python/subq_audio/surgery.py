@@ -130,12 +130,15 @@ class SubQBypassAttention(nn.Module):
         - Direct Tensor arithmetic operations (`hidden_states = residual + attn_out`)
         """
         past_state = past_key_value if isinstance(past_key_value, torch.Tensor) else None
+        position_embeddings = kwargs.pop("position_embeddings", None)
 
         output, next_state = self.core(
             hidden_states=hidden_states,
             past_state=past_state,
             attention_mask=attention_mask,
             use_cache=use_cache,
+            position_embeddings=position_embeddings,
+            **kwargs,
         )
 
         ret_past = next_state if (self.return_tuple_arity == 3 or (use_cache and next_state is not None)) else None

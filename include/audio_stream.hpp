@@ -182,6 +182,17 @@ public:
         stopped_.store(true, std::memory_order_release);
     }
 
+    [[nodiscard]] size_t capacity() const noexcept { return max_chunks_; }
+    [[nodiscard]] bool is_stopped() const noexcept { return stopped_.load(std::memory_order_relaxed); }
+    [[nodiscard]] size_t size() const noexcept {
+        size_t h = head_.load(std::memory_order_relaxed);
+        size_t t = tail_.load(std::memory_order_relaxed);
+        return (t >= h) ? (t - h) : (max_chunks_ - (h - t));
+    }
+    [[nodiscard]] bool empty() const noexcept {
+        return head_.load(std::memory_order_relaxed) == tail_.load(std::memory_order_relaxed);
+    }
+
 private:
     std::vector<AudioChunk> buffer_;
     size_t max_chunks_;

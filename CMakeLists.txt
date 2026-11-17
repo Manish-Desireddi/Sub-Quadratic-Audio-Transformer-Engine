@@ -146,8 +146,6 @@ set(SRC_FILES
     src/kernels/attention_backward.cpp
     src/engine.cpp
     src/safetensors.cpp
-    src/kernels/layer_norm.cpp
-    src/kernels/ffn.cpp
     ${WEBSOCKET_SRC}
 )
 

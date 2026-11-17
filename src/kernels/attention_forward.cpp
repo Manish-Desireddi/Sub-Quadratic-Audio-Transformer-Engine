@@ -6,6 +6,7 @@
  */
 
 #include "attention.hpp"
+#include "kernels.hpp"
 #include "gpu_macros.hpp"
 
 #if defined(USE_CUDA) || defined(USE_HIP)
@@ -43,7 +44,8 @@ __global__ void causal_linear_attention_kernel(
                 float k_mapped = shared_k[i];
                 float new_s = decay_factor * S[s_offset + i * d_model + j] + k_mapped * v_val;
                 // Explicitly flush subnormals in case FFI resets hardware CSR
-                if (new_s > -1e-15f && new_s < 1e-15f) new_s = 0.0f;
+                // Device code cannot call the host helper; same bound (smallest normal float)
+                if (fabsf(new_s) < 1.17549435e-38f) new_s = 0.0f;
                 S[s_offset + i * d_model + j] = new_s;
             }
             
@@ -161,7 +163,7 @@ void run_attention_forward(AttentionContext& ctx) {
                         float decay_step = std::pow(decay_factor, static_cast<float>(c_len - 1 - tau));
                         new_s += decay_step * k_val * v_val;
                     }
-                    if (new_s > -1e-15f && new_s < 1e-15f) new_s = 0.0f;
+                    if (subq::is_subnormal_or_zero(new_s)) new_s = 0.0f;
                     S_curr[i * d_model + j] = new_s;
                 }
             }

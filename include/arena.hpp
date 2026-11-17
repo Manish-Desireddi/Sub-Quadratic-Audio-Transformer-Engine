@@ -37,9 +37,14 @@ public:
     uint8_t* allocate(size_t bytes);
 
     /**
-     * @brief Resets the allocation head to 0 and zero-initializes the entire arena buffer.
+     * @brief Resets the allocation head to 0 (O(1) bump reset without full-buffer memset).
      */
     void reset_head();
+
+    /**
+     * @brief Zero-initializes the entire allocated arena buffer.
+     */
+    void zero_all();
 
     /**
      * @brief Gets current byte offset (high-water mark) within the arena.

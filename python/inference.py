@@ -51,8 +51,8 @@ class AudioFrontend(torch.nn.Module):
 
 def main():
     print("Initializing Sub-Quadratic Engine (End-to-End Test)...")
-    # Initialize with 256MB VRAM Arena
-    engine = AudioTransformerEngine(vram_capacity=256 * 1024 * 1024)
+    # Initialize with 32MB VRAM Arena
+    engine = AudioTransformerEngine(vram_capacity=32 * 1024 * 1024)
 
     batch = 2
     seq_len = 1024

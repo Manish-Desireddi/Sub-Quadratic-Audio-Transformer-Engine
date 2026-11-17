@@ -239,11 +239,11 @@ Examples:
     if args.feature:
         pytest_args.extend(["-k", args.feature])
 
-    if existing_files:
-        pytest_args.extend(existing_files)
-    else:
-        # Fallback to tests/e2e directory discovery if specific tier files are not yet created
-        pytest_args.append("tests/e2e")
+    if not existing_files:
+        print(f"Error: No test files found for requested tier '{args.tier}'. (Code {EXIT_NO_TESTS})")
+        return EXIT_NO_TESTS
+
+    pytest_args.extend(existing_files)
 
     collector = JsonReportCollector()
     try:

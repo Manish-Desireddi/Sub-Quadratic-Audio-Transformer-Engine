@@ -167,6 +167,23 @@ class SubQAudioModel(SubQAudioPreTrainedModel):
     def __init__(self, config: SubQAudioConfig):
         super().__init__(config)
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
+        self.audio_frontend = nn.Sequential(
+            nn.Conv1d(
+                config.audio_channels,
+                config.hidden_size,
+                kernel_size=16,
+                stride=4,
+                padding=6,
+            ),
+            nn.GELU(),
+            nn.Conv1d(
+                config.hidden_size,
+                config.hidden_size,
+                kernel_size=4,
+                stride=2,
+                padding=1,
+            ),
+        )
         self.layers = nn.ModuleList([SubQAudioBlock(config) for _ in range(config.num_hidden_layers)])
         self.norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.post_init()
@@ -183,6 +200,7 @@ class SubQAudioModel(SubQAudioPreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
+        input_values: Optional[torch.FloatTensor] = None,
         use_cache: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -192,14 +210,19 @@ class SubQAudioModel(SubQAudioPreTrainedModel):
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
+        inputs_specified = sum(x is not None for x in [input_ids, inputs_embeds, input_values])
+        if inputs_specified > 1:
+            raise ValueError("You cannot specify more than one of input_ids, inputs_embeds, and input_values")
         elif input_ids is not None:
             hidden_states = self.embed_tokens(input_ids)
         elif inputs_embeds is not None:
             hidden_states = inputs_embeds
+        elif input_values is not None:
+            if input_values.ndim == 2:
+                input_values = input_values.unsqueeze(1)
+            hidden_states = self.audio_frontend(input_values).transpose(1, 2)
         else:
-            raise ValueError("You have to specify either input_ids or inputs_embeds")
+            raise ValueError("You have to specify either input_ids, inputs_embeds, or input_values")
 
         all_hidden_states = () if output_hidden_states else None
         next_decoder_cache = () if use_cache else None
@@ -259,6 +282,7 @@ class SubQAudioForCausalLM(SubQAudioPreTrainedModel, GenerationMixin):
         attention_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
+        input_values: Optional[torch.FloatTensor] = None,
         labels: Optional[torch.LongTensor] = None,
         use_cache: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
@@ -272,6 +296,7 @@ class SubQAudioForCausalLM(SubQAudioPreTrainedModel, GenerationMixin):
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
+            input_values=input_values,
             use_cache=use_cache,
             output_hidden_states=output_hidden_states,
             return_dict=True,

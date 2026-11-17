@@ -7,7 +7,11 @@ import sys
 from typing import List, Optional
 
 from . import _C
-from ._C import SubQEngine, get_device_info
+try:
+    from ._C import SubQEngine, get_device_info, AudioStreamBuffer
+except ImportError:
+    from ._C import SubQEngine, get_device_info
+    AudioStreamBuffer = None
 from .engine import (
     AudioTransformerEngine,
     setup_distributed,
@@ -53,6 +57,7 @@ def generate(Q, K, V, decay_factor: float = 0.99):
 __all__: List[str] = [
     "_C",
     "SubQEngine",
+    "AudioStreamBuffer",
     "get_device_info",
     "AudioTransformerEngine",
     "Engine",

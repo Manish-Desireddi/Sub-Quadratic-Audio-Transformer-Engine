@@ -473,8 +473,9 @@ TEST_CASE("AudioStreamBuffer high-concurrency producer-consumer stress test", "[
     });
 
     producer.join();
+    consumer.join();
 
-    // Drain remaining chunks
+    // Drain remaining chunks if any
     AudioChunk remaining;
     while (ring_buffer.pop(remaining, false)) {
         chunks_popped.fetch_add(1, std::memory_order_relaxed);
@@ -485,7 +486,6 @@ TEST_CASE("AudioStreamBuffer high-concurrency producer-consumer stress test", "[
     }
 
     ring_buffer.stop();
-    consumer.join();
 
     REQUIRE(chunks_popped.load() > 0);
     REQUIRE(chunks_popped.load() <= total_chunks);

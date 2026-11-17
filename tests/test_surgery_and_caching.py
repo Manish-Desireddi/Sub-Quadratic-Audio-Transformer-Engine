@@ -12,40 +12,50 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from subq_audio.autograd import chunkwise_flash_linear_attention, SubQLinearAttention
-from subq_audio.model import SubQAudioConfig, SubQAudioForCausalLM
+from subq_audio.model import SubQAudioConfig, SubQAudioModel, SubQAudioForCausalLM
 from subq_audio.surgery import bypass_transformer_with_subq, LayerWiseDistillationTrainer, SubQBypassAttention
 
 
 def sequential_linear_attention_reference(q, k, v, decay_w):
     """
-    Reference sequential token-by-token linear attention.
-    Computes exact recurrent state updates without chunking.
+    Reference sequential token-by-token normalized linear attention.
+    Computes exact recurrent state updates with D^{-0.5} scaling and Z_t running normalizer.
     """
     B, H, L, D = q.shape
-    phi_q = torch.where(q > 0.0, q + 1.0, torch.exp(q))
+    scale = 1.0 / math.sqrt(D)
+    phi_q = torch.where(q > 0.0, q + 1.0, torch.exp(q)) * scale
     phi_k = torch.where(k > 0.0, k + 1.0, torch.exp(k))
 
     if decay_w.dim() == 1:
         log_gamma = -F.softplus(-decay_w).view(1, H, 1).expand(B, H, L)
     elif decay_w.dim() == 2:
         log_gamma = -F.softplus(-decay_w).unsqueeze(-1).expand(B, H, L)
+    elif decay_w.dim() == 3:
+        if decay_w.shape == (B, H, L):
+            log_gamma = -F.softplus(-decay_w)
+        else:
+            log_gamma = -F.softplus(-decay_w).expand(B, H, L)
     else:
-        log_gamma = -F.softplus(-decay_w)
+        log_gamma = -F.softplus(-decay_w).expand(B, H, L)
 
     gamma = torch.exp(log_gamma)
 
     out = torch.zeros((B, H, L, D), dtype=q.dtype, device=q.device)
     S = torch.zeros((B, H, D, D), dtype=q.dtype, device=q.device)
+    Z = torch.zeros((B, H, D), dtype=q.dtype, device=q.device)
 
     for t in range(L):
         g_t = gamma[:, :, t].unsqueeze(-1).unsqueeze(-1)
+        g_t_z = gamma[:, :, t].unsqueeze(-1)
         k_t = phi_k[:, :, t].unsqueeze(-1)  # [B, H, D, 1]
         v_t = v[:, :, t].unsqueeze(-2)      # [B, H, 1, D]
         S = g_t * S + torch.matmul(k_t, v_t)
+        Z = g_t_z * Z + phi_k[:, :, t]
 
         q_t = phi_q[:, :, t].unsqueeze(-2)  # [B, H, 1, D]
-        o_t = torch.matmul(q_t, S).squeeze(-2)
-        out[:, :, t] = o_t
+        num_t = torch.matmul(q_t, S).squeeze(-2)  # [B, H, D]
+        denom_t = (phi_q[:, :, t] * Z).sum(dim=-1, keepdim=True).clamp(min=1e-5)
+        out[:, :, t] = num_t / denom_t
 
     return out, S
 
@@ -400,4 +410,102 @@ def test_llama_gqa_surgery_and_padding_invariance():
 
     gen = bypassed_llama.generate(input_ids, max_new_tokens=3)
     assert gen.shape == (1, 6)
+
+
+def test_distillation_representation_and_token_fidelity():
+    """
+    Verify representation alignment and top-1 token agreement via distillation.
+    Asserts:
+    1. Student initial activation variance vs teacher is bounded (<= 5x std).
+    2. Stage 1 & Stage 2 distillation converges on acoustic token batches.
+    3. Post-distillation cosine similarity > 0.95 and top-1 token agreement >= 90%.
+    """
+    import copy
+    torch.manual_seed(42)
+    teacher = MockTransformerModel(vocab_size=100, hidden_size=64, num_layers=2)
+    teacher.eval()
+
+    student = copy.deepcopy(teacher)
+    bypass_transformer_with_subq(
+        student,
+        target_select_suffixes=("self_attn",),
+        copy_weights=True,
+    )
+
+    test_input = torch.randint(0, 100, (4, 16))
+    with torch.no_grad():
+        t_out = teacher(test_input)
+        s_out = student(test_input)
+        std_ratio = (s_out.std() / t_out.std()).item()
+        assert std_ratio <= 5.0, f"Activation explosion detected: std_ratio={std_ratio:.2f} > 5.0"
+
+    trainer = LayerWiseDistillationTrainer(
+        teacher_model=teacher,
+        student_model=student,
+        lambda_cos=1.0,
+        temperature=1.0,
+        alpha_kd=0.7,
+    )
+
+    dataset = [torch.randint(0, 100, (4, 16)) for _ in range(8)]
+
+    # Stage 1: layer-wise attention feature alignment
+    trainable_params_s1 = trainer._freeze_non_attention_student_parameters()
+    optimizer_s1 = torch.optim.AdamW(trainable_params_s1, lr=5e-3)
+    for epoch in range(15):
+        for batch in dataset:
+            trainer.train_stage1_step(batch, optimizer_s1)
+
+    # Stage 2: end-to-end representation and logit distillation
+    trainable_params_s2 = trainer._unfreeze_all_student_parameters()
+    optimizer_s2 = torch.optim.AdamW(trainable_params_s2, lr=1e-3)
+    for epoch in range(15):
+        for batch in dataset:
+            trainer.train_stage2_step(batch, optimizer_s2)
+
+    student.eval()
+    with torch.no_grad():
+        eval_batch = dataset[0]
+        t_logits = teacher(eval_batch)
+        s_logits = student(eval_batch)
+        cos_sim = F.cosine_similarity(s_logits, t_logits, dim=-1).mean().item()
+        agree = (t_logits.argmax(dim=-1) == s_logits.argmax(dim=-1)).float().mean().item()
+
+    assert cos_sim > 0.95, f"Post-distillation cosine similarity {cos_sim:.4f} <= 0.95"
+    assert agree >= 0.90, f"Post-distillation token agreement {agree:.4f} < 0.90"
+
+
+def test_audio_frontend_continuous_waveform():
+    """Verify that SubQAudioModel and SubQAudioForCausalLM accept raw continuous audio waveforms."""
+    config = SubQAudioConfig(
+        vocab_size=100,
+        hidden_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        intermediate_size=128,
+        audio_channels=1,
+    )
+    model = SubQAudioModel(config)
+    causal_lm = SubQAudioForCausalLM(config)
+    model.eval()
+    causal_lm.eval()
+
+    # Continuous raw audio PCM waveform: 2 batches of 1024 samples
+    raw_audio = torch.randn(2, 1024)
+
+    with torch.no_grad():
+        out_base = model(input_values=raw_audio)
+        hidden_states = out_base.last_hidden_state
+        assert hidden_states.shape[0] == 2
+        assert hidden_states.shape[2] == 64
+        assert not torch.isnan(hidden_states).any()
+
+        out_lm = causal_lm(input_values=raw_audio)
+        logits = out_lm.logits
+        assert logits.shape[0] == 2
+        assert logits.shape[1] == hidden_states.shape[1]
+        assert logits.shape[2] == 100
+        assert not torch.isnan(logits).any()
+
+
 

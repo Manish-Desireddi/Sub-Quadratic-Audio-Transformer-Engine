@@ -20,7 +20,7 @@ class AudioTransformerEngine:
     """
     def __init__(
         self,
-        vram_capacity: int = 256 * 1024 * 1024,
+        vram_capacity: int = 32 * 1024 * 1024,
         device_id: int = 0,
     ) -> None:
         self._vram_capacity = vram_capacity
@@ -61,7 +61,7 @@ class AudioTransformerEngine:
                 raise TypeError(f"Expected torch.Tensor, got {type(Q)}")
 
             orig_dtype = Q.dtype
-            if orig_dtype in (torch.float16, torch.bfloat16):
+            if orig_dtype in (torch.float16, torch.bfloat16) or not Q.is_cuda or str(Q.device).startswith(("cpu", "mps")):
                 from .autograd import chunkwise_flash_linear_attention
                 gamma = min(max(float(decay_factor), 1e-7), 1.0 - 1e-7)
                 logit_w = math.log(gamma / (1.0 - gamma))
@@ -81,13 +81,6 @@ class AudioTransformerEngine:
                     int(batch), int(seq_len), int(d_model), float(decay_factor)
                 )
                 return O
-            else:
-                # CPU PyTorch Tensor
-                Q_np = np.ascontiguousarray(Q.detach().cpu().numpy(), dtype=np.float32)
-                K_np = np.ascontiguousarray(K.detach().cpu().numpy(), dtype=np.float32)
-                V_np = np.ascontiguousarray(V.detach().cpu().numpy(), dtype=np.float32)
-                O_np = self._engine.forward(Q_np, K_np, V_np, float(decay_factor))
-                return torch.from_numpy(O_np).to(device=Q.device, dtype=orig_dtype)
 
         # NumPy Array Dispatch
         Q_np = np.ascontiguousarray(Q, dtype=np.float32)
@@ -109,7 +102,7 @@ class AudioTransformerEngine:
         if hasattr(Q, "is_cuda"):
             import torch
             orig_dtype = Q.dtype
-            if orig_dtype in (torch.float16, torch.bfloat16):
+            if orig_dtype in (torch.float16, torch.bfloat16) or not Q.is_cuda or str(Q.device).startswith(("cpu", "mps")):
                 from .autograd import SubQAttentionFunction
                 q_req = Q.detach().clone().requires_grad_(True)
                 k_req = K.detach().clone().requires_grad_(True)
@@ -145,18 +138,6 @@ class AudioTransformerEngine:
                     int(batch), int(seq_len), int(d_model), float(decay_factor)
                 )
                 return dQ, dK, dV, float(d_decay)
-            else:
-                dO_np = np.ascontiguousarray(dO.detach().cpu().numpy(), dtype=np.float32)
-                Q_np = np.ascontiguousarray(Q.detach().cpu().numpy(), dtype=np.float32)
-                K_np = np.ascontiguousarray(K.detach().cpu().numpy(), dtype=np.float32)
-                V_np = np.ascontiguousarray(V.detach().cpu().numpy(), dtype=np.float32)
-                dQ_np, dK_np, dV_np, d_decay = self._engine.backward(dO_np, Q_np, K_np, V_np, float(decay_factor))
-                return (
-                    torch.from_numpy(dQ_np).to(device=Q.device, dtype=orig_dtype),
-                    torch.from_numpy(dK_np).to(device=K.device, dtype=orig_dtype),
-                    torch.from_numpy(dV_np).to(device=V.device, dtype=orig_dtype),
-                    float(d_decay)
-                )
 
         dO_np = np.ascontiguousarray(dO, dtype=np.float32)
         Q_np = np.ascontiguousarray(Q, dtype=np.float32)

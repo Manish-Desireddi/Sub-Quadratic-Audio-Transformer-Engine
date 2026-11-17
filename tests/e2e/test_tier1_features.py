@@ -22,7 +22,6 @@ Total: Exactly 70 test cases (5 per feature class).
 
 import math
 import os
-import queue
 import struct
 import sys
 import tempfile
@@ -225,75 +224,91 @@ class TestTier1Feature02NetworkIngestion:
 # ==============================================================================
 
 class TestTier1Feature03RingBuffer:
-    """TEST-T1-F03-01 to TEST-T1-F03-05: Lock-Free SPSC Ring Ingestion & Drop-Oldest Policy."""
+    """TEST-T1-F03-01 to TEST-T1-F03-05: Real Lock-Free SPSC Ring Ingestion & Drop-Oldest Policy."""
 
     def test_t1_f03_01_spsc_fifo_integrity(self):
-        """TEST-T1-F03-01: Verify strict FIFO ordering of sequenced audio chunks."""
-        q = queue.Queue(maxsize=1024)
+        """TEST-T1-F03-01: Verify strict FIFO ordering of sequenced audio chunks using C++ AudioStreamBuffer."""
+        from subq_audio import AudioStreamBuffer
+        buf = AudioStreamBuffer(max_chunks=1024)
         for i in range(100):
-            q.put({"seq": i, "data": np.full(64, float(i), dtype=np.float32)})
+            samples = np.full(64, float(i), dtype=np.float32)
+            assert buf.push_samples(samples, timestamp=i) is True
 
         popped = []
-        while not q.empty():
-            item = q.get()
-            popped.append(item["seq"])
+        while not buf.empty():
+            item = buf.pop_samples(block=False)
+            assert item is not None
+            timestamp, data = item
+            popped.append(timestamp)
+            assert np.allclose(data, float(timestamp))
 
         assert popped == list(range(100)), "FIFO order must be strictly preserved"
 
     def test_t1_f03_02_drop_oldest_backpressure(self):
         """TEST-T1-F03-02: Verify drop-oldest replacement policy retains newest chunks under backpressure."""
+        from subq_audio import AudioStreamBuffer
         capacity = 16
-        # Simulate ring buffer with drop-oldest overwrite
-        ring_buffer = [None] * capacity
-        head = 0
+        buf = AudioStreamBuffer(max_chunks=capacity)
         total_pushed = 32
 
         for seq in range(total_pushed):
-            ring_buffer[head % capacity] = seq
-            head += 1
+            samples = np.full(32, float(seq), dtype=np.float32)
+            assert buf.push_samples(samples, timestamp=seq) is True
 
-        # Buffer should contain items from seq total_pushed - capacity to total_pushed - 1
-        expected_items = set(range(total_pushed - capacity, total_pushed))
-        actual_items = set(ring_buffer)
-        assert actual_items == expected_items, "Drop-oldest policy must retain the newest capacity items"
+        # SPSC ring buffer of capacity 16 retains capacity - 1 = 15 newest unread chunks (17 to 31)
+        popped_timestamps = []
+        while not buf.empty():
+            item = buf.pop_samples(block=False)
+            assert item is not None
+            popped_timestamps.append(item[0])
+
+        expected_items = list(range(total_pushed - (capacity - 1), total_pushed))
+        assert popped_timestamps == expected_items, "Drop-oldest policy must retain the newest capacity items"
 
     def test_t1_f03_03_non_blocking_pop_empty(self):
         """TEST-T1-F03-03: Verify non-blocking pop on empty buffer returns immediately."""
-        q = queue.Queue()
+        from subq_audio import AudioStreamBuffer
+        buf = AudioStreamBuffer(max_chunks=16)
         start = time.perf_counter()
-        is_empty = q.empty()
+        item = buf.pop_samples(block=False)
         elapsed = time.perf_counter() - start
-        assert is_empty is True
+        assert item is None
+        assert buf.empty() is True
         assert elapsed < 0.01, "Non-blocking check must return in < 10ms"
 
     def test_t1_f03_04_graceful_stop_and_drain(self):
         """TEST-T1-F03-04: Verify stop signal allows draining existing queued chunks cleanly."""
-        q = queue.Queue()
+        from subq_audio import AudioStreamBuffer
+        buf = AudioStreamBuffer(max_chunks=16)
         for i in range(5):
-            q.put(i)
+            assert buf.push_samples(np.full(16, float(i), dtype=np.float32), timestamp=i) is True
 
-        stopped = True
+        buf.stop()
+        assert buf.is_stopped() is True
+        # Further pushes should fail
+        assert buf.push_samples(np.full(16, 99.0, dtype=np.float32), timestamp=99) is False
+
         drained = []
-        while not q.empty():
-            drained.append(q.get())
+        while not buf.empty():
+            item = buf.pop_samples(block=False)
+            if item is not None:
+                drained.append(item[0])
 
         assert len(drained) == 5
         assert drained == [0, 1, 2, 3, 4]
 
     def test_t1_f03_05_power_of_two_normalization(self):
-        """TEST-T1-F03-05: Verify power-of-2 capacity calculations for bitwise mask modulo."""
-        def next_power_of_2(n: int) -> int:
-            if n <= 1:
-                return 2
-            return 1 << (n - 1).bit_length()
-
-        assert next_power_of_2(500) == 512
-        assert next_power_of_2(1000) == 1024
-        assert next_power_of_2(16) == 16
-        assert next_power_of_2(1) == 2
+        """TEST-T1-F03-05: Verify power-of-2 capacity calculations for bitwise mask modulo in AudioStreamBuffer."""
+        from subq_audio import AudioStreamBuffer
+        assert AudioStreamBuffer(500).capacity() == 512
+        assert AudioStreamBuffer(1000).capacity() == 1024
+        assert AudioStreamBuffer(16).capacity() == 16
+        assert AudioStreamBuffer(2).capacity() == 2
+        assert AudioStreamBuffer(1).capacity() in (1, 2)
         for test_val in [7, 65, 129, 250, 1023]:
-            res = next_power_of_2(test_val)
-            assert (res & (res - 1)) == 0, f"{res} is not a power of 2"
+            buf = AudioStreamBuffer(test_val)
+            cap = buf.capacity()
+            assert (cap & (cap - 1)) == 0, f"{cap} is not a power of 2"
 
 
 # ==============================================================================
@@ -669,7 +684,7 @@ class TestTier1Feature08GradientMatching:
         # Decay w = +20 maps gamma ~ 1.0 (undamped causal scan)
         w = torch.tensor([20.0])
         out_subq = SubQAttentionFunction.apply(Q, K, V, w)
-        out_ref = linear_attention_forward(Q, K, V)
+        out_ref = linear_attention_forward(Q, K, V, normalize=True)
 
         torch.testing.assert_close(out_subq, out_ref, atol=1e-3, rtol=1e-3)
 

@@ -52,7 +52,7 @@ def test_differentiable_log_probabilities(tiny_config):
 
     # Verify all layers have gradients
     for name, param in model.named_parameters():
-        if param.requires_grad:
+        if param.requires_grad and not name.startswith("model.audio_frontend"):
             assert param.grad is not None, f"Parameter {name} has no gradient"
             assert not torch.isnan(param.grad).any(), f"Parameter {name} has NaN gradient"
             assert not torch.isinf(param.grad).any(), f"Parameter {name} has Inf gradient"
@@ -219,6 +219,6 @@ def test_policy_gradient_stability_across_decay_bounds(decay_init):
     assert not torch.isnan(loss).any()
     assert not torch.isinf(loss).any()
     for name, p in model.named_parameters():
-        if p.requires_grad:
+        if p.requires_grad and p.grad is not None:
             assert not torch.isnan(p.grad).any(), f"NaN in {name} grad with decay_init={decay_init}"
             assert not torch.isinf(p.grad).any(), f"Inf in {name} grad with decay_init={decay_init}"

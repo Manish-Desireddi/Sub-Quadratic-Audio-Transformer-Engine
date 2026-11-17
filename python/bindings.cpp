@@ -11,8 +11,10 @@
 #include "engine.hpp"
 #include "arena.hpp"
 #include "attention.hpp"
+#include "kernels.hpp"
 #include "gpu_macros.hpp"
 #include "safetensors.hpp"
+#include "audio_stream.hpp"
 #include <mutex>
 #include <vector>
 #include <cmath>
@@ -87,7 +89,7 @@ public:
         return device_id;
     }
 
-    explicit SubQEngineWrapper(size_t vram_capacity = 256 * 1024 * 1024, int device_id = 0) 
+    explicit SubQEngineWrapper(size_t vram_capacity = 32 * 1024 * 1024, int device_id = 0) 
         : device_id_(prepare_device(device_id)), arena_(vram_capacity), engine_(arena_) {
         SUBQ_ENABLE_DENORMALS_FLUSH();
     }
@@ -278,153 +280,36 @@ public:
             size_t batch = buf_Q.shape[0];
             size_t seq_len = buf_Q.shape[1];
             size_t d_model = buf_Q.shape[2];
-
             size_t total_elements = batch * seq_len * d_model;
 
             float* dQ_data = new float[total_elements];
             float* dK_data = new float[total_elements];
             float* dV_data = new float[total_elements];
 
-            std::memset(dQ_data, 0, total_elements * sizeof(float));
-            std::memset(dK_data, 0, total_elements * sizeof(float));
-            std::memset(dV_data, 0, total_elements * sizeof(float));
-
-            const float* dO_ptr = static_cast<const float*>(buf_dO.ptr);
-            const float* Q_ptr = static_cast<const float*>(buf_Q.ptr);
-            const float* K_ptr = static_cast<const float*>(buf_K.ptr);
-            const float* V_ptr = static_cast<const float*>(buf_V.ptr);
-
             float total_d_decay = 0.0f;
+            float d_w = 0.0f;
+            float clamped_decay = std::max(std::min(decay_factor, 1.0f - 1e-6f), 1e-6f);
+            float w_val = std::log(clamped_decay / (1.0f - clamped_decay));
 
-            // Compute exact analytical reverse adjoint linear attention gradients with on-the-fly chunkwise recomputation
-            constexpr size_t CHUNK_SIZE = 64;
-            size_t num_chunks = (seq_len + CHUNK_SIZE - 1) / CHUNK_SIZE;
+            subq::AttentionBackwardContext<float> bwd_ctx;
+            bwd_ctx.Q = static_cast<const float*>(buf_Q.ptr);
+            bwd_ctx.K = static_cast<const float*>(buf_K.ptr);
+            bwd_ctx.V = static_cast<const float*>(buf_V.ptr);
+            bwd_ctx.dO = static_cast<const float*>(buf_dO.ptr);
+            bwd_ctx.S = nullptr;
+            bwd_ctx.S0 = nullptr;
+            bwd_ctx.dQ = dQ_data;
+            bwd_ctx.dK = dK_data;
+            bwd_ctx.dV = dV_data;
+            bwd_ctx.raw_decay_w = w_val;
+            bwd_ctx.d_raw_decay_w = &d_w;
+            bwd_ctx.d_gamma = &total_d_decay;
+            bwd_ctx.batch_size = batch;
+            bwd_ctx.num_heads = 1;
+            bwd_ctx.seq_len = seq_len;
+            bwd_ctx.head_dim = d_model;
 
-            std::vector<float> S_boundaries((num_chunks + 1) * d_model * d_model, 0.0f);
-            std::vector<float> S_chunk(CHUNK_SIZE * d_model * d_model, 0.0f);
-            std::vector<float> S_curr(d_model * d_model, 0.0f);
-            std::vector<float> Gamma(d_model * d_model, 0.0f);
-
-            for (size_t b = 0; b < batch; ++b) {
-                size_t b_offset = b * (seq_len * d_model);
-
-                // 1. Forward pass to record state sequence at chunk boundaries only
-                std::fill(S_curr.begin(), S_curr.end(), 0.0f);
-                std::fill(S_boundaries.begin(), S_boundaries.end(), 0.0f);
-
-                for (size_t c = 0; c < num_chunks; ++c) {
-                    size_t c_start = c * CHUNK_SIZE;
-                    size_t c_end = std::min(c_start + CHUNK_SIZE, seq_len);
-                    std::memcpy(&S_boundaries[c * d_model * d_model], S_curr.data(), d_model * d_model * sizeof(float));
-
-                    for (size_t t = c_start; t < c_end; ++t) {
-                        size_t t_offset = b_offset + t * d_model;
-                        for (size_t i = 0; i < d_model; ++i) {
-                            float k_val = K_ptr[t_offset + i];
-                            float phi_k = (k_val > 0.0f) ? (k_val + 1.0f) : std::exp(k_val);
-
-                            for (size_t j = 0; j < d_model; ++j) {
-                                float v_val = V_ptr[t_offset + j];
-                                float new_s = decay_factor * S_curr[i * d_model + j] + phi_k * v_val;
-                                if (std::abs(new_s) < 1e-15f) new_s = 0.0f;
-                                S_curr[i * d_model + j] = new_s;
-                            }
-                        }
-                    }
-                }
-                std::memcpy(&S_boundaries[num_chunks * d_model * d_model], S_curr.data(), d_model * d_model * sizeof(float));
-
-                // 2. Backward reverse adjoint scan chunk by chunk
-                std::fill(Gamma.begin(), Gamma.end(), 0.0f);
-
-                for (int64_t c = static_cast<int64_t>(num_chunks) - 1; c >= 0; --c) {
-                    size_t c_start = static_cast<size_t>(c) * CHUNK_SIZE;
-                    size_t c_end = std::min(c_start + CHUNK_SIZE, seq_len);
-                    size_t c_len = c_end - c_start;
-
-                    const float* S_start_c = &S_boundaries[static_cast<size_t>(c) * d_model * d_model];
-                    std::memcpy(S_curr.data(), S_start_c, d_model * d_model * sizeof(float));
-
-                    for (size_t step = 0; step < c_len; ++step) {
-                        size_t t = c_start + step;
-                        size_t t_offset = b_offset + t * d_model;
-                        size_t chunk_s_offset = step * (d_model * d_model);
-
-                        for (size_t i = 0; i < d_model; ++i) {
-                            float k_val = K_ptr[t_offset + i];
-                            float phi_k = (k_val > 0.0f) ? (k_val + 1.0f) : std::exp(k_val);
-
-                            for (size_t j = 0; j < d_model; ++j) {
-                                float v_val = V_ptr[t_offset + j];
-                                float new_s = decay_factor * S_curr[i * d_model + j] + phi_k * v_val;
-                                if (std::abs(new_s) < 1e-15f) new_s = 0.0f;
-                                S_curr[i * d_model + j] = new_s;
-                                S_chunk[chunk_s_offset + i * d_model + j] = new_s;
-                            }
-                        }
-                    }
-
-                    for (int64_t step = static_cast<int64_t>(c_len) - 1; step >= 0; --step) {
-                        size_t t = c_start + static_cast<size_t>(step);
-                        size_t t_offset = b_offset + t * d_model;
-                        size_t chunk_s_offset = static_cast<size_t>(step) * (d_model * d_model);
-                        const float* S_prev = (step > 0) ? &S_chunk[(static_cast<size_t>(step) - 1) * d_model * d_model] : S_start_c;
-
-                        for (size_t i = 0; i < d_model; ++i) {
-                            float q_val = Q_ptr[t_offset + i];
-                            float dphi_q_val = (q_val > 0.0f) ? 1.0f : std::exp(q_val);
-
-                            float dphi_Q_i = 0.0f;
-                            for (size_t j = 0; j < d_model; ++j) {
-                                float do_j = dO_ptr[t_offset + j];
-                                float s_ij = S_chunk[chunk_s_offset + i * d_model + j];
-                                dphi_Q_i += do_j * s_ij;
-                            }
-                            dQ_data[t_offset + i] = dphi_Q_i * dphi_q_val;
-                        }
-
-                        for (size_t i = 0; i < d_model; ++i) {
-                            float q_val = Q_ptr[t_offset + i];
-                            float phi_q = (q_val > 0.0f) ? (q_val + 1.0f) : std::exp(q_val);
-
-                            for (size_t j = 0; j < d_model; ++j) {
-                                float do_j = dO_ptr[t_offset + j];
-                                Gamma[i * d_model + j] = decay_factor * Gamma[i * d_model + j] + phi_q * do_j;
-                            }
-                        }
-
-                        for (size_t j = 0; j < d_model; ++j) {
-                            float dv_j = 0.0f;
-                            for (size_t i = 0; i < d_model; ++i) {
-                                float k_val = K_ptr[t_offset + i];
-                                float phi_k = (k_val > 0.0f) ? (k_val + 1.0f) : std::exp(k_val);
-                                dv_j += phi_k * Gamma[i * d_model + j];
-                            }
-                            dV_data[t_offset + j] = dv_j;
-                        }
-
-                        for (size_t i = 0; i < d_model; ++i) {
-                            float k_val = K_ptr[t_offset + i];
-                            float dphi_k_val = (k_val > 0.0f) ? 1.0f : std::exp(k_val);
-
-                            float dphi_K_i = 0.0f;
-                            for (size_t j = 0; j < d_model; ++j) {
-                                float v_val = V_ptr[t_offset + j];
-                                dphi_K_i += v_val * Gamma[i * d_model + j];
-                            }
-                            dK_data[t_offset + i] = dphi_K_i * dphi_k_val;
-                        }
-
-                        if (t > 0) {
-                            for (size_t i = 0; i < d_model; ++i) {
-                                for (size_t j = 0; j < d_model; ++j) {
-                                    total_d_decay += S_prev[i * d_model + j] * Gamma[i * d_model + j];
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            engine_.backward(bwd_ctx);
 
             py::capsule free_dq(dQ_data, [](void *f) { delete[] reinterpret_cast<float*>(f); });
             py::capsule free_dk(dK_data, [](void *f) { delete[] reinterpret_cast<float*>(f); });
@@ -446,9 +331,14 @@ public:
         std::lock_guard<std::mutex> lock(arena_mutex_);
         try {
             CHECK_GPU_ERROR(gpuSetDevice(device_id_));
+            size_t total_elements = batch * seq_len * d_model;
+
+            float total_d_decay = 0.0f;
+            float d_w = 0.0f;
+            float clamped_decay = std::max(std::min(decay_factor, 1.0f - 1e-6f), 1e-6f);
+            float w_val = std::log(clamped_decay / (1.0f - clamped_decay));
 
 #if defined(USE_CUDA) || defined(USE_HIP)
-            size_t total_elements = batch * seq_len * d_model;
             std::vector<float> host_dO(total_elements);
             std::vector<float> host_Q(total_elements);
             std::vector<float> host_K(total_elements);
@@ -462,158 +352,50 @@ public:
             CHECK_GPU_ERROR(gpuMemcpy(host_K.data(), reinterpret_cast<const void*>(k_ptr), total_elements * sizeof(float), gpuMemcpyDeviceToHost));
             CHECK_GPU_ERROR(gpuMemcpy(host_V.data(), reinterpret_cast<const void*>(v_ptr), total_elements * sizeof(float), gpuMemcpyDeviceToHost));
 
-            const float* dO = host_dO.data();
-            const float* Q = host_Q.data();
-            const float* K = host_K.data();
-            const float* V = host_V.data();
+            subq::AttentionBackwardContext<float> bwd_ctx;
+            bwd_ctx.Q = host_Q.data();
+            bwd_ctx.K = host_K.data();
+            bwd_ctx.V = host_V.data();
+            bwd_ctx.dO = host_dO.data();
+            bwd_ctx.S = nullptr;
+            bwd_ctx.S0 = nullptr;
+            bwd_ctx.dQ = host_dQ.data();
+            bwd_ctx.dK = host_dK.data();
+            bwd_ctx.dV = host_dV.data();
+            bwd_ctx.raw_decay_w = w_val;
+            bwd_ctx.d_raw_decay_w = &d_w;
+            bwd_ctx.d_gamma = &total_d_decay;
+            bwd_ctx.batch_size = batch;
+            bwd_ctx.num_heads = 1;
+            bwd_ctx.seq_len = seq_len;
+            bwd_ctx.head_dim = d_model;
 
-            float* dQ = host_dQ.data();
-            float* dK = host_dK.data();
-            float* dV = host_dV.data();
-#else
-            const float* dO = reinterpret_cast<const float*>(do_ptr);
-            const float* Q = reinterpret_cast<const float*>(q_ptr);
-            const float* K = reinterpret_cast<const float*>(k_ptr);
-            const float* V = reinterpret_cast<const float*>(v_ptr);
+            engine_.backward(bwd_ctx);
 
-            float* dQ = reinterpret_cast<float*>(dq_ptr);
-            float* dK = reinterpret_cast<float*>(dk_ptr);
-            float* dV = reinterpret_cast<float*>(dv_ptr);
-#endif
-
-            float total_d_decay = 0.0f;
-            constexpr size_t CHUNK_SIZE = 64;
-            size_t num_chunks = (seq_len + CHUNK_SIZE - 1) / CHUNK_SIZE;
-
-            std::vector<float> S_boundaries((num_chunks + 1) * d_model * d_model, 0.0f);
-            std::vector<float> S_chunk(CHUNK_SIZE * d_model * d_model, 0.0f);
-            std::vector<float> S_curr(d_model * d_model, 0.0f);
-            std::vector<float> Gamma(d_model * d_model, 0.0f);
-
-            for (size_t b = 0; b < batch; ++b) {
-                size_t b_offset = b * (seq_len * d_model);
-
-                std::fill(S_curr.begin(), S_curr.end(), 0.0f);
-                std::fill(S_boundaries.begin(), S_boundaries.end(), 0.0f);
-
-                for (size_t c = 0; c < num_chunks; ++c) {
-                    size_t c_start = c * CHUNK_SIZE;
-                    size_t c_end = std::min(c_start + CHUNK_SIZE, seq_len);
-                    std::memcpy(&S_boundaries[c * d_model * d_model], S_curr.data(), d_model * d_model * sizeof(float));
-
-                    for (size_t t = c_start; t < c_end; ++t) {
-                        size_t t_offset = b_offset + t * d_model;
-                        for (size_t i = 0; i < d_model; ++i) {
-                            float k_val = K[t_offset + i];
-                            float phi_k = (k_val > 0.0f) ? (k_val + 1.0f) : std::exp(k_val);
-
-                            for (size_t j = 0; j < d_model; ++j) {
-                                float v_val = V[t_offset + j];
-                                float new_s = decay_factor * S_curr[i * d_model + j] + phi_k * v_val;
-                                if (std::abs(new_s) < 1e-15f) new_s = 0.0f;
-                                S_curr[i * d_model + j] = new_s;
-                            }
-                        }
-                    }
-                }
-                std::memcpy(&S_boundaries[num_chunks * d_model * d_model], S_curr.data(), d_model * d_model * sizeof(float));
-
-                std::fill(Gamma.begin(), Gamma.end(), 0.0f);
-
-                for (int64_t c = static_cast<int64_t>(num_chunks) - 1; c >= 0; --c) {
-                    size_t c_start = static_cast<size_t>(c) * CHUNK_SIZE;
-                    size_t c_end = std::min(c_start + CHUNK_SIZE, seq_len);
-                    size_t c_len = c_end - c_start;
-
-                    const float* S_start_c = &S_boundaries[static_cast<size_t>(c) * d_model * d_model];
-                    std::memcpy(S_curr.data(), S_start_c, d_model * d_model * sizeof(float));
-
-                    for (size_t step = 0; step < c_len; ++step) {
-                        size_t t = c_start + step;
-                        size_t t_offset = b_offset + t * d_model;
-                        size_t chunk_s_offset = step * (d_model * d_model);
-
-                        for (size_t i = 0; i < d_model; ++i) {
-                            float k_val = K[t_offset + i];
-                            float phi_k = (k_val > 0.0f) ? (k_val + 1.0f) : std::exp(k_val);
-
-                            for (size_t j = 0; j < d_model; ++j) {
-                                float v_val = V[t_offset + j];
-                                float new_s = decay_factor * S_curr[i * d_model + j] + phi_k * v_val;
-                                if (std::abs(new_s) < 1e-15f) new_s = 0.0f;
-                                S_curr[i * d_model + j] = new_s;
-                                S_chunk[chunk_s_offset + i * d_model + j] = new_s;
-                            }
-                        }
-                    }
-
-                    for (int64_t step = static_cast<int64_t>(c_len) - 1; step >= 0; --step) {
-                        size_t t = c_start + static_cast<size_t>(step);
-                        size_t t_offset = b_offset + t * d_model;
-                        size_t chunk_s_offset = static_cast<size_t>(step) * (d_model * d_model);
-                        const float* S_prev = (step > 0) ? &S_chunk[(static_cast<size_t>(step) - 1) * d_model * d_model] : S_start_c;
-
-                        for (size_t i = 0; i < d_model; ++i) {
-                            float q_val = Q[t_offset + i];
-                            float dphi_q_val = (q_val > 0.0f) ? 1.0f : std::exp(q_val);
-
-                            float dphi_Q_i = 0.0f;
-                            for (size_t j = 0; j < d_model; ++j) {
-                                float do_j = dO[t_offset + j];
-                                float s_ij = S_chunk[chunk_s_offset + i * d_model + j];
-                                dphi_Q_i += do_j * s_ij;
-                            }
-                            dQ[t_offset + i] = dphi_Q_i * dphi_q_val;
-                        }
-
-                        for (size_t i = 0; i < d_model; ++i) {
-                            float q_val = Q[t_offset + i];
-                            float phi_q = (q_val > 0.0f) ? (q_val + 1.0f) : std::exp(q_val);
-
-                            for (size_t j = 0; j < d_model; ++j) {
-                                float do_j = dO[t_offset + j];
-                                Gamma[i * d_model + j] = decay_factor * Gamma[i * d_model + j] + phi_q * do_j;
-                            }
-                        }
-
-                        for (size_t j = 0; j < d_model; ++j) {
-                            float dv_j = 0.0f;
-                            for (size_t i = 0; i < d_model; ++i) {
-                                float k_val = K[t_offset + i];
-                                float phi_k = (k_val > 0.0f) ? (k_val + 1.0f) : std::exp(k_val);
-                                dv_j += phi_k * Gamma[i * d_model + j];
-                            }
-                            dV[t_offset + j] = dv_j;
-                        }
-
-                        for (size_t i = 0; i < d_model; ++i) {
-                            float k_val = K[t_offset + i];
-                            float dphi_k_val = (k_val > 0.0f) ? 1.0f : std::exp(k_val);
-
-                            float dphi_K_i = 0.0f;
-                            for (size_t j = 0; j < d_model; ++j) {
-                                float v_val = V[t_offset + j];
-                                dphi_K_i += v_val * Gamma[i * d_model + j];
-                            }
-                            dK[t_offset + i] = dphi_K_i * dphi_k_val;
-                        }
-
-                        if (t > 0) {
-                            for (size_t i = 0; i < d_model; ++i) {
-                                for (size_t j = 0; j < d_model; ++j) {
-                                    total_d_decay += S_prev[i * d_model + j] * Gamma[i * d_model + j];
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-#if defined(USE_CUDA) || defined(USE_HIP)
             CHECK_GPU_ERROR(gpuMemcpy(reinterpret_cast<void*>(dq_ptr), host_dQ.data(), total_elements * sizeof(float), gpuMemcpyHostToDevice));
             CHECK_GPU_ERROR(gpuMemcpy(reinterpret_cast<void*>(dk_ptr), host_dK.data(), total_elements * sizeof(float), gpuMemcpyHostToDevice));
             CHECK_GPU_ERROR(gpuMemcpy(reinterpret_cast<void*>(dv_ptr), host_dV.data(), total_elements * sizeof(float), gpuMemcpyHostToDevice));
-#endif
+#else
+            subq::AttentionBackwardContext<float> bwd_ctx;
+            bwd_ctx.Q = reinterpret_cast<const float*>(q_ptr);
+            bwd_ctx.K = reinterpret_cast<const float*>(k_ptr);
+            bwd_ctx.V = reinterpret_cast<const float*>(v_ptr);
+            bwd_ctx.dO = reinterpret_cast<const float*>(do_ptr);
+            bwd_ctx.S = nullptr;
+            bwd_ctx.S0 = nullptr;
+            bwd_ctx.dQ = reinterpret_cast<float*>(dq_ptr);
+            bwd_ctx.dK = reinterpret_cast<float*>(dk_ptr);
+            bwd_ctx.dV = reinterpret_cast<float*>(dv_ptr);
+            bwd_ctx.raw_decay_w = w_val;
+            bwd_ctx.d_raw_decay_w = &d_w;
+            bwd_ctx.d_gamma = &total_d_decay;
+            bwd_ctx.batch_size = batch;
+            bwd_ctx.num_heads = 1;
+            bwd_ctx.seq_len = seq_len;
+            bwd_ctx.head_dim = d_model;
 
+            engine_.backward(bwd_ctx);
+#endif
             return total_d_decay;
         } catch (const std::exception& e) {
             throw std::runtime_error(std::string("Engine Backward Raw Error: ") + e.what());
@@ -634,7 +416,7 @@ PYBIND11_MODULE(_C, m) {
 
     py::class_<SubQEngineWrapper>(m, "SubQEngine")
         .def(py::init<size_t, int>(), 
-             py::arg("vram_capacity") = 1024 * 1024 * 256,
+             py::arg("vram_capacity") = 1024 * 1024 * 32,
              py::arg("device_id") = 0)
         .def_property_readonly("device_id", &SubQEngineWrapper::device_id, "Physical GPU device ID for isolated VRAM arena")
         .def("load", &SubQEngineWrapper::load, py::arg("filepath"), "Load weights from safetensors file")
@@ -653,4 +435,31 @@ PYBIND11_MODULE(_C, m) {
              py::arg("dq_ptr"), py::arg("dk_ptr"), py::arg("dv_ptr"),
              py::arg("batch"), py::arg("seq_len"), py::arg("d_model"), py::arg("decay_factor") = 0.99f,
              "Execute zero-copy backward pass on raw device pointers returning d_decay");
+
+    py::class_<AudioStreamBuffer>(m, "AudioStreamBuffer")
+        .def(py::init<size_t>(), py::arg("max_chunks") = 1024)
+        .def("push_samples", [](AudioStreamBuffer& self, py::array_t<float, py::array::c_style | py::array::forcecast> samples, uint64_t timestamp) {
+            AudioChunk chunk;
+            chunk.timestamp = timestamp;
+            py::buffer_info buf = samples.request();
+            const float* ptr = static_cast<const float*>(buf.ptr);
+            size_t n = static_cast<size_t>(buf.size);
+            chunk.samples.assign(ptr, ptr + n);
+            return self.push(chunk);
+        }, py::arg("samples"), py::arg("timestamp") = 0, "Push raw audio samples into buffer")
+        .def("pop_samples", [](AudioStreamBuffer& self, bool block) -> py::object {
+            AudioChunk chunk;
+            if (!self.pop(chunk, block)) {
+                return py::none();
+            }
+            py::array_t<float> result(chunk.samples.size());
+            py::buffer_info buf = result.request();
+            std::memcpy(buf.ptr, chunk.samples.data(), chunk.samples.size() * sizeof(float));
+            return py::make_tuple(chunk.timestamp, result);
+        }, py::arg("block") = false, "Pop oldest audio chunk returning (timestamp, samples) or None")
+        .def("stop", &AudioStreamBuffer::stop, "Signal buffer stop and shutdown ingestion")
+        .def("capacity", &AudioStreamBuffer::capacity, "Get maximum chunk capacity")
+        .def("is_stopped", &AudioStreamBuffer::is_stopped, "Check if buffer has been stopped")
+        .def("size", &AudioStreamBuffer::size, "Get current number of queued chunks")
+        .def("empty", &AudioStreamBuffer::empty, "Check if buffer is empty");
 }

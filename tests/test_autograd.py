@@ -23,17 +23,21 @@ from subq_audio.autograd import (
 
 def reference_linear_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, decay_w: torch.Tensor) -> torch.Tensor:
     """
-    Pure PyTorch reference implementation for Sub-Quadratic Linear Attention.
+    Pure PyTorch reference implementation for Sub-Quadratic Linear Attention
+    with D^{-0.5} query scaling and running denominator normalizer Z_t.
     Uses autograd-tracked loop for ground-truth gradient comparison.
     """
     gamma = torch.sigmoid(decay_w)
-    phi_Q = feature_map(q)
+    D = q.shape[-1]
+    scale = 1.0 / math.sqrt(D)
+    phi_Q = feature_map(q) * scale
     phi_K = feature_map(k)
 
     if q.ndim == 4:
         B, H, T, D = q.shape
-        out = torch.zeros_like(q)
+        out = torch.zeros_like(v)
         S = torch.zeros((B, H, D, D), dtype=q.dtype, device=q.device)
+        Z = torch.zeros((B, H, D), dtype=q.dtype, device=q.device)
         for t in range(T):
             kt = phi_K[:, :, t, :].unsqueeze(3)  # [B, H, D, 1]
             vt = v[:, :, t, :].unsqueeze(2)      # [B, H, 1, D]
@@ -44,13 +48,19 @@ def reference_linear_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
             else:
                 g_t = gamma.view(-1, H, 1, 1)
             S = g_t * S + torch.matmul(kt, vt)
-            qt = phi_Q[:, :, t, :].unsqueeze(2)  # [B, H, 1, D]
-            out[:, :, t, :] = torch.matmul(qt, S).squeeze(2)
+            g_z = g_t.squeeze(-1) if g_t.ndim == 4 else g_t
+            Z = g_z * Z + phi_K[:, :, t, :]
+            qt = phi_Q[:, :, t, :]
+            num_t = torch.matmul(qt.unsqueeze(2), S).squeeze(2)
+            denom_t = (qt * Z).sum(dim=-1, keepdim=True)
+            denom_t = torch.clamp(denom_t, min=1e-5)
+            out[:, :, t, :] = num_t / denom_t
         return out
 
     B, T, D = q.shape
-    out = torch.zeros_like(q)
+    out = torch.zeros_like(v)
     S = torch.zeros((B, D, D), dtype=q.dtype, device=q.device)
+    Z = torch.zeros((B, D), dtype=q.dtype, device=q.device)
     for t in range(T):
         kt = phi_K[:, t, :].unsqueeze(2)  # [B, D, 1]
         vt = v[:, t, :].unsqueeze(1)      # [B, 1, D]
@@ -59,8 +69,13 @@ def reference_linear_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
         else:
             g_t = gamma.view(-1, 1, 1)
         S = g_t * S + torch.bmm(kt, vt)
-        qt = phi_Q[:, t, :].unsqueeze(1)  # [B, 1, D]
-        out[:, t, :] = torch.bmm(qt, S).squeeze(1)
+        g_z = g_t.squeeze(-1) if g_t.ndim == 3 else g_t
+        Z = g_z * Z + phi_K[:, t, :]
+        qt = phi_Q[:, t, :]
+        num_t = torch.bmm(qt.unsqueeze(1), S).squeeze(1)
+        denom_t = (qt * Z).sum(dim=-1, keepdim=True)
+        denom_t = torch.clamp(denom_t, min=1e-5)
+        out[:, t, :] = num_t / denom_t
     return out
 
 

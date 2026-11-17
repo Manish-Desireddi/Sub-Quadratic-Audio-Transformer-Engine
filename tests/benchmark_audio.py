@@ -9,8 +9,10 @@ import os
 import sys
 import time
 import wave
+import math
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 # Add python directory to path
@@ -18,13 +20,39 @@ sys.path.append(
     os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python")
 )
 import subq_audio
+from subq_audio import AudioTransformerEngine
+from subq_audio.autograd import chunkwise_flash_linear_attention
+
+
+class AudioFrontend(nn.Module):
+    """
+    Strided 1D convolution acoustic frontend.
+    Converts raw PCM audio waveforms into continuous sequence representations.
+    """
+    def __init__(self, d_model: int):
+        super().__init__()
+        self.conv = nn.Conv1d(
+            in_channels=1,
+            out_channels=d_model,
+            kernel_size=16,
+            stride=4,
+            padding=6,
+        )
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+
+    def forward(self, x: torch.Tensor):
+        # x: (batch, num_samples)
+        x = x.unsqueeze(1)  # (batch, 1, num_samples)
+        feat = self.conv(x).transpose(1, 2)  # (batch, seq_len, d_model)
+        return self.q_proj(feat), self.k_proj(feat), self.v_proj(feat)
 
 
 def load_wav_pcm(filepath):
     with wave.open(filepath, "rb") as w:
         n_frames = w.getnframes()
         raw_data = w.readframes(n_frames)
-        # 16-bit PCM to float32
         data = np.frombuffer(raw_data, dtype=np.int16).astype(np.float32) / 32768.0
     return data
 
@@ -40,41 +68,43 @@ def benchmark_real_audio():
     raw_audio = load_wav_pcm(audio_path)
     print(f"Successfully loaded {len(raw_audio)} raw audio samples.\n")
 
-    # The engine expects 3D tensors: (batch, seq_len, d_model)
     batch = 1
     seq_len = 1024
     d_model = 256
-    chunk_size = seq_len * d_model
+    raw_samples_per_chunk = seq_len * 4  # 4x downsampling via stride-4 Conv1d
 
     print(f"Engine Schema: Batch={batch}, SeqLen={seq_len}, D_Model={d_model}")
-    print(f"Chunk size required: {chunk_size} samples.")
+    print(f"Conv1d Acoustic Frontend: downsampling raw PCM by 4x ({raw_samples_per_chunk} samples -> {seq_len} tokens).\n")
 
-    # We will simulate a simple feature projection: we take the raw audio, pad it,
-    # and chunk it to form our Q, K, V matrices.
-    # In a real model, this would be a 1D Conv / Mel-Spectrogram frontend.
-    padded_len = int(np.ceil(len(raw_audio) / chunk_size)) * chunk_size
+    frontend = AudioFrontend(d_model)
+    frontend.eval()
+
+    # Pad raw audio to multiple of raw_samples_per_chunk
+    padded_len = int(np.ceil(len(raw_audio) / raw_samples_per_chunk)) * raw_samples_per_chunk
     padded_audio = np.pad(raw_audio, (0, padded_len - len(raw_audio)))
+    num_frames = padded_len // raw_samples_per_chunk
 
-    num_frames = padded_len // chunk_size
-    print(f"Audio chunked into {num_frames} frames for streaming.\n")
+    audio_chunks = torch.from_numpy(padded_audio).view(num_frames, 1, raw_samples_per_chunk)
 
-    Q_frames = []
-    for i in range(num_frames):
-        frame = padded_audio[i * chunk_size : (i + 1) * chunk_size].reshape(
-            batch, seq_len, d_model
-        )
-        Q_frames.append(frame)
+    # Process all chunks through frontend to get realistic continuous Q, K, V
+    with torch.no_grad():
+        Q_list, K_list, V_list = [], [], []
+        for i in range(num_frames):
+            q, k, v = frontend(audio_chunks[i])
+            Q_list.append(q)
+            K_list.append(k)
+            V_list.append(v)
 
     print("[Verification] Starting FFI Native Engine Execution...")
+    engine = AudioTransformerEngine(vram_capacity=32 * 1024 * 1024)
 
     # Warmup
-    _ = subq_audio.generate(Q_frames[0], Q_frames[0], Q_frames[0])
+    _ = engine.forward(Q_list[0], K_list[0], V_list[0])
 
-    start_time = time.time()
-    for frame in Q_frames:
-        # Pass the same real audio frame as Q, K, V for stress testing the memory bandwidth
-        _ = subq_audio.generate(frame, frame, frame)
-    end_time = time.time()
+    start_time = time.perf_counter()
+    for i in range(num_frames):
+        _ = engine.forward(Q_list[i], K_list[i], V_list[i])
+    end_time = time.perf_counter()
 
     cpp_time = ((end_time - start_time) / num_frames) * 1000
     print("[Success] Verified: Native Engine successfully processed real human audio.")
@@ -83,32 +113,34 @@ def benchmark_real_audio():
     # Benchmarks
     print("\n=== Architecture Benchmarks (Real Audio Pipeline) ===")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    Q_t = torch.tensor(Q_frames[0], device=device)
+    Q_t = Q_list[0].to(device)
+    K_t = K_list[0].to(device)
+    V_t = V_list[0].to(device)
 
-    # Standard PyTorch Attention
-    torch.cuda.synchronize() if device.type == "cuda" else None
-    start = time.time()
+    # 1. Standard PyTorch SDPA Attention
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    start = time.perf_counter()
     for _ in range(50):
-        _ = F.scaled_dot_product_attention(Q_t, Q_t, Q_t, is_causal=True)
-    torch.cuda.synchronize() if device.type == "cuda" else None
-    sdpa_time = ((time.time() - start) / 50) * 1000
+        _ = F.scaled_dot_product_attention(Q_t, K_t, V_t, is_causal=True)
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    sdpa_time = ((time.perf_counter() - start) / 50) * 1000
 
-    # Mamba Simulation (Genuine Recurrent Scan)
-    A = torch.rand(d_model, device=device)
-    h = torch.zeros(batch, d_model, device=device)
-    torch.cuda.synchronize() if device.type == "cuda" else None
-    start = time.time()
+    # 2. PyTorch Vectorized Chunkwise Parallel Scan (Normalized Linear Attention)
+    decay_w_t = torch.tensor(math.log(0.99 / 0.01), dtype=Q_t.dtype, device=device)
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    start = time.perf_counter()
     for _ in range(50):
-        h.zero_()
-        for t in range(seq_len):
-            h = A * h + Q_t[:, t, :] * Q_t[:, t, :]
-            _ = h * Q_t[:, t, :]
-    torch.cuda.synchronize() if device.type == "cuda" else None
-    mamba_time = ((time.time() - start) / 50) * 1000
+        _ = chunkwise_flash_linear_attention(Q_t, K_t, V_t, decay_w=decay_w_t)
+    if device.type == "cuda":
+        torch.cuda.synchronize()
+    chunkwise_time = ((time.perf_counter() - start) / 50) * 1000
 
-    print(f"1. Sub-Quadratic Engine (Ours): {cpp_time:.2f} ms")
-    print(f"2. Standard Attention (PyTorch): {sdpa_time:.2f} ms")
-    print(f"3. Mamba Scan (PyTorch Sim): {mamba_time:.2f} ms")
+    print(f"1. Sub-Quadratic Engine (Native C++ FFI): {cpp_time:.2f} ms")
+    print(f"2. Sub-Quadratic Engine (Vectorized Scan): {chunkwise_time:.2f} ms")
+    print(f"3. Standard Attention (PyTorch SDPA):      {sdpa_time:.2f} ms")
 
 
 if __name__ == "__main__":

@@ -93,7 +93,7 @@ def benchmark() -> None:
             return
 
         try:
-            engine = AudioTransformerEngine(vram_capacity=256 * 1024 * 1024)
+            engine = AudioTransformerEngine(vram_capacity=32 * 1024 * 1024)
             # Warmup
             _ = engine.forward(Q, K, V)
             if device.type == "cuda":

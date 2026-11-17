@@ -56,6 +56,9 @@ uint8_t* MemoryArena::allocate(size_t bytes) {
 
 void MemoryArena::reset_head() {
     offset = 0;
+}
+
+void MemoryArena::zero_all() {
     CHECK_GPU_ERROR(gpuMemset(base_ptr, 0, capacity));
 }
 
