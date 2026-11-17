@@ -3,7 +3,11 @@ name: Automated Tests
 on:
   pull_request:
     branches:
+      - master
       - main
+  push:
+    branches:
+      - master
 
 jobs:
   test:
@@ -21,7 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install setuptools pybind11 numpy torch pytest
+          pip install setuptools pybind11 numpy scipy psutil torch pytest
 
       - name: Build and Run C++ Tests
         run: |
@@ -32,6 +36,10 @@ jobs:
       - name: Build and Install Python Package
         run: |
           pip install -e .
+
+      - name: Run Python unit tests (CPU)
+        run: |
+          python -m pytest tests/test_autograd.py tests/test_api.py tests/test_model.py -q
 
       - name: Run Python Benchmarks/Tests
         run: |
